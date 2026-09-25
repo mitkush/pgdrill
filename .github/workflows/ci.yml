@@ -1,0 +1,101 @@
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        ruby: ["3.1", "3.3", "3.4"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: "${{ matrix.ruby }}", bundler-cache: true }
+      - run: bundle exec rake test
+
+  # Break real-world backups on purpose; every scenario must be classified correctly.
+  scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { db: pagila, pg: 15 }
+          - { db: pagila, pg: 16 }
+          - { db: pagila, pg: 17 }
+          - { db: gitlab, pg: 16 }
+          - { db: mastodon, pg: 16 }
+          - { db: regression, pg: 16 }
+    name: scenarios (${{ matrix.db }}, pg${{ matrix.pg }})
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: "3.3", bundler-cache: true }
+      - name: Postgres ${{ matrix.pg }} from packages
+        if: matrix.db != 'regression'
+        run: |
+          [ -x /usr/lib/postgresql/${{ matrix.pg }}/bin/initdb ] || sudo apt-get install -y -q postgresql-${{ matrix.pg }} > /dev/null
+          echo "PG_BIN=/usr/lib/postgresql/${{ matrix.pg }}/bin" >> $GITHUB_ENV
+      - name: Postgres ${{ matrix.pg }} from source (the regression suite needs its build tree)
+        if: matrix.db == 'regression'
+        run: |
+          sudo apt-get install -y -q libreadline-dev zlib1g-dev flex bison > /dev/null
+          curl -sfL https://ftp.postgresql.org/pub/source/v16.15/postgresql-16.15.tar.bz2 | tar xj
+          cd postgresql-16.15
+          ./configure --prefix=$HOME/pg --without-icu > /dev/null
+          make -s -j4 > /dev/null && make -s install > /dev/null && make -s -C contrib/amcheck install > /dev/null
+          echo "PG_BIN=$HOME/pg/bin" >> $GITHUB_ENV
+          echo "PG_SRC=$PWD" >> $GITHUB_ENV
+      - name: Production cluster + ${{ matrix.db }} data
+        run: |
+          echo "$PG_BIN" >> $GITHUB_PATH
+          export PATH=$PG_BIN:$PATH
+          bash test/scenarios/start-prod.sh "$PG_BIN"
+          bash test/scenarios/load.sh ${{ matrix.db }}
+      - name: Scenarios
+        env:
+          PGDRILL_SCENARIO_DB: postgresql://postgres@127.0.0.1:55432/${{ matrix.db }}
+        run: bundle exec rake scenarios | tee -a $GITHUB_STEP_SUMMARY; exit ${PIPESTATUS[0]}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scenarios-${{ matrix.db }}-pg${{ matrix.pg }}
+          path: tmp/scenarios/results-*.json
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        pg: [15, 16, 17]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build pgdrill:pg${{ matrix.pg }}
+        run: docker build -f docker/Dockerfile --build-arg PG_MAJOR=${{ matrix.pg }} -t pgdrill:pg${{ matrix.pg }} .
+      - name: Smoke test (good backup passes, truncated backup fails)
+        run: |
+          set -e
+          PG_BIN=/usr/lib/postgresql/${{ matrix.pg }}/bin
+          [ -x $PG_BIN/initdb ] || sudo apt-get install -y -q postgresql-${{ matrix.pg }} > /dev/null
+          export PATH=$PG_BIN:$PATH
+          bash test/scenarios/start-prod.sh $PG_BIN
+          bash test/scenarios/load.sh pagila
+          pg_dump -h 127.0.0.1 -p 55432 -U postgres -Fc -d pagila -f good.dump
+          head -c 300000 good.dump > broken.dump
+          chmod a+r good.dump broken.dump
+          docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg${{ matrix.pg }} \
+            run /work/good.dump --baseline-db postgresql://postgres@127.0.0.1:55432/pagila
+          set +e
+          docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg${{ matrix.pg }} run /work/broken.dump
+          code=$?
+          [ $code -eq 1 ] || { echo "expected exit 1 for a broken backup, got $code"; exit 1; }
