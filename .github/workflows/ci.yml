@@ -111,4 +111,4 @@ jobs:
           out=$(docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg16 run /work/from17.dump 2>&1)
           code=$?
           echo "$out"
-          [ $code -eq 2 ] && grep -q "needs Postgres 17" <<< "$out" || { echo "expected exit 2 with a version message, got $code"; exit 1; }
+          [ $code -eq 2 ] && grep -q "newer pg_dump" <<< "$out" || { echo "expected exit 2 with a version message, got $code"; exit 1; }
