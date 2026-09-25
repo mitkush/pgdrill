@@ -24,8 +24,10 @@ module Pgdrill
     def versions
       @versions ||= if archive?
         # An unreadable table of contents is a broken backup, not a tool error: let the restore report it.
-        toc, _err, _st = Open3.capture3("pg_restore", "-l", path)
-        { from: toc[/Dumped from database version: (\S+)/, 1], by: toc[/Dumped by pg_dump version: (\S+)/, 1] }
+        # The exception is an archive format newer than this pg_restore understands (written by a newer pg_dump).
+        toc, err, _st = Open3.capture3("pg_restore", "-l", path)
+        { from: toc[/Dumped from database version: (\S+)/, 1], by: toc[/Dumped by pg_dump version: (\S+)/, 1],
+          newer_archive: err[/unsupported version \(([\d.]+)\) in file header/, 1] }
       else
         head = each_sql_line.first(40).join
         { from: head[/Dumped from database version (\S+)/, 1], by: head[/Dumped by pg_dump version (\S+)/, 1] }

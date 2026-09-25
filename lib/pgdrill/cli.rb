@@ -105,8 +105,8 @@ module Pgdrill
           end
         else
           cluster = Cluster.new
+          ENV["PATH"] = "#{Cluster.bindir}#{File::PATH_SEPARATOR}#{ENV['PATH']}" # restore with the matching pg_restore
           ensure_new_enough!(backup, "the local Postgres", cluster.major)
-          ENV["PATH"] = "#{Cluster.bindir}#{File::PATH_SEPARATOR}#{ENV['PATH']}"
           @err.puts "starting throwaway Postgres #{cluster.major}…" if o[:format] == "text"
           Db.new(cluster.start.url, label: "throwaway")
         end
@@ -136,6 +136,10 @@ module Pgdrill
 
     # A too-old restore side would make a healthy backup look broken, so it's a tool error (exit 2), not a FAIL.
     def ensure_new_enough!(backup, what, have)
+      if (fmt = backup.versions[:newer_archive])
+        raise Error, "backup archive format #{fmt} was written by a newer pg_dump than this pg_restore " \
+                     "(Postgres #{client_major('pg_restore')}) can read; use a newer pgdrill Docker image or Postgres"
+      end
       need = backup.required_major or return
       return if have.to_i >= need
       raise Error, "backup needs Postgres #{need}+ to restore (source server #{backup.versions[:from] || '?'}, " \
