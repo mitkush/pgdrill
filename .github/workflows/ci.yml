@@ -100,3 +100,15 @@ jobs:
           docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg${{ matrix.pg }} run /work/broken.dump
           code=$?
           [ $code -eq 1 ] || { echo "expected exit 1 for a broken backup, got $code"; exit 1; }
+      - name: A backup written by a newer pg_dump is a tool error (exit 2), not a failed backup
+        if: matrix.pg == 16
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
+          sudo apt-get install -y -q postgresql-client-17 > /dev/null
+          /usr/lib/postgresql/17/bin/pg_dump -h 127.0.0.1 -p 55432 -U postgres -Fc -d pagila -f from17.dump
+          chmod a+r from17.dump
+          set +e
+          out=$(docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg16 run /work/from17.dump 2>&1)
+          code=$?
+          echo "$out"
+          [ $code -eq 2 ] && grep -q "needs Postgres 17" <<< "$out" || { echo "expected exit 2 with a version message, got $code"; exit 1; }

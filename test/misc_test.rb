@@ -15,6 +15,20 @@ class DurationTest < Minitest::Test
   end
 end
 
+class BaselineSizeTest < Minitest::Test
+  def small?(t) = Pgdrill::Baseline.small?(t, 100_000)
+
+  def test_uses_row_estimate_when_known
+    assert small?("estimate" => 99_999, "bytes" => 10**12)
+    refute small?("estimate" => 100_000, "bytes" => 0)
+  end
+
+  def test_never_analyzed_tables_are_judged_by_size_on_disk
+    assert small?("estimate" => nil, "bytes" => 8192)
+    refute small?("estimate" => nil, "bytes" => 67 * 1024 * 1024)
+  end
+end
+
 class DbTest < Minitest::Test
   def test_credentials_go_to_env_not_argv
     env = Pgdrill::Db.env_for("postgresql://app%40x:s%3Acret@db.example.com:6543/my%20db?sslmode=require")

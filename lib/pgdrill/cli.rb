@@ -1,3 +1,4 @@
+require "open3"
 require "optparse"
 
 module Pgdrill
@@ -9,7 +10,7 @@ module Pgdrill
     USAGE = <<~TXT
       Usage:
         pgdrill run BACKUP [options]        restore BACKUP into a throwaway server and verify it
-        pgdrill baseline --db URL [options] record what production looks like (run right after the backup)
+        pgdrill baseline --db URL [options] record what production looks like (run just before the backup)
         pgdrill version
 
       Run `pgdrill run --help` or `pgdrill baseline --help` for options.
@@ -42,8 +43,11 @@ module Pgdrill
     def baseline(argv)
       o = { output: "baseline.json", exact_row_limit: Baseline::DEFAULT_EXACT_ROW_LIMIT, statement_timeout: "30s" }
       parser = OptionParser.new do |p|
-        p.banner = "Usage: pgdrill baseline --db URL [options]\n\nReads catalog metadata and small/indexed data only; safe for production and read replicas."
-        p.on("--db URL", "Production or replica connection URL (or PGDRILL_DB env var)") { o[:db] = _1 }
+        p.banner = "Usage: pgdrill baseline --db URL [options]\n\n" \
+                   "Run it just before pg_dump starts: the backup must then contain everything the baseline saw.\n" \
+                   "Reads catalog metadata and small/indexed data only; safe for production and read replicas.\n" \
+                   "Keep passwords out of the command line: use PGDRILL_DB, PGPASSWORD or ~/.pgpass."
+        p.on("--db URL", "Production or replica connection URL (default: PGDRILL_DB env var)") { o[:db] = _1 }
         p.on("-o", "--output FILE", "Where to write the baseline (default baseline.json)") { o[:output] = _1 }
         p.on("--exact-row-limit N", Integer, "Count rows exactly only in tables smaller than N (default #{o[:exact_row_limit]}); larger tables use planner estimates") { o[:exact_row_limit] = _1 }
         p.on("--statement-timeout DURATION", "Per-query timeout on production (default 30s)") { o[:statement_timeout] = _1 }
@@ -63,8 +67,10 @@ module Pgdrill
       parser = OptionParser.new do |p|
         p.banner = "Usage: pgdrill run BACKUP [options]\n\nBACKUP: pg_dump custom (-Fc), directory (-Fd) or tar (-Ft) archive, or plain .sql / .sql.gz"
         p.on("--baseline FILE", "Compare against a baseline written by `pgdrill baseline`") { o[:baseline] = _1 }
-        p.on("--baseline-db URL", "Capture the baseline live from production/replica (read-only)") { o[:baseline_db] = _1 }
-        p.on("--target URL", "Restore into this server instead of a throwaway local one (needs CREATE DATABASE)") { o[:target] = _1 }
+        p.on("--baseline-db URL", "Capture the baseline live from production/replica, read-only (or PGDRILL_BASELINE_DB).",
+             "Only for drills right after the backup: data written since then counts against --lag-tolerance") { o[:baseline_db] = _1 }
+        p.on("--target URL", "Restore into this server instead of a throwaway local one (or PGDRILL_TARGET).",
+             "Needs CREATE DATABASE and CREATEROLE: roles the backup references are created as NOLOGIN") { o[:target] = _1 }
         p.on("--max-age DURATION", "Fail if the newest restored data is older than this, e.g. 26h") { o[:max_age] = Duration.parse(_1) }
         p.on("--lag-tolerance DURATION", "How far restored data may trail the baseline (default 5m)") { o[:lag_tolerance] = Duration.parse(_1) }
         p.on("-j", "--jobs N", Integer, "Parallel restore jobs (default 4)") { o[:jobs] = _1 }
@@ -75,6 +81,8 @@ module Pgdrill
         p.on("--keep", "Keep the restored database (and server) for inspection") { o[:keep] = true }
       end
       parser.parse!(argv)
+      o[:baseline_db] ||= ENV["PGDRILL_BASELINE_DB"] unless o[:baseline]
+      o[:target] ||= ENV["PGDRILL_TARGET"]
       path = argv.shift or raise Error, "run needs a BACKUP path\n\n#{parser.help}"
       raise Error, "use either --baseline or --baseline-db, not both" if o[:baseline] && o[:baseline_db]
 
@@ -91,13 +99,13 @@ module Pgdrill
       cluster = nil
       admin =
         if o[:target]
-          Db.new(o[:target], label: "target")
+          Db.new(o[:target], label: "target").tap do |db|
+            ensure_new_enough!(backup, "the --target server", db.value("show server_version_num").to_i / 10_000)
+            ensure_new_enough!(backup, "pg_restore on PATH", client_major("pg_restore")) if backup.archive?
+          end
         else
           cluster = Cluster.new
-          if backup.major && cluster.major < backup.major
-            raise Error, "backup was made by Postgres #{backup.major} but the local server is Postgres #{cluster.major}; " \
-                         "use a newer Postgres (or the pgdrill Docker image for #{backup.major}), or pass --target"
-          end
+          ensure_new_enough!(backup, "the local Postgres", cluster.major)
           ENV["PATH"] = "#{Cluster.bindir}#{File::PATH_SEPARATOR}#{ENV['PATH']}"
           @err.puts "starting throwaway Postgres #{cluster.major}…" if o[:format] == "text"
           Db.new(cluster.start.url, label: "throwaway")
@@ -119,11 +127,27 @@ module Pgdrill
     ensure
       if o[:keep] && result
         @err.puts "kept restored database #{result[:name]}"
-        @err.puts "  connect: psql postgresql://postgres@127.0.0.1:#{cluster.port}/#{result[:name]}\n  stop:    #{cluster.stop_command}" if cluster
+        @err.puts "  connect: psql '#{cluster.url(result[:name])}'\n  stop:    #{cluster.stop_command}" if cluster
       else
         restorer&.drop(result) if result && o[:target]
         cluster&.stop
       end
+    end
+
+    # A too-old restore side would make a healthy backup look broken, so it's a tool error (exit 2), not a FAIL.
+    def ensure_new_enough!(backup, what, have)
+      need = backup.required_major or return
+      return if have.to_i >= need
+      raise Error, "backup needs Postgres #{need}+ to restore (source server #{backup.versions[:from] || '?'}, " \
+                   "pg_dump #{backup.versions[:by] || '?'}) but #{what} is #{have}; " \
+                   "use the pgdrill:pg#{need} Docker image or a newer Postgres"
+    end
+
+    def client_major(cmd)
+      out, st = Open3.capture2(cmd, "--version")
+      st.success? ? out[/(\d+)(?:\.\d+)?/, 1].to_i : 0
+    rescue Errno::ENOENT
+      raise Error, "#{cmd} not found on PATH"
     end
 
     def load_baseline(o)

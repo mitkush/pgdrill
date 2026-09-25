@@ -18,6 +18,7 @@ module Pgdrill
       name = "pgdrill_#{Time.now.utc.strftime('%Y%m%d%H%M%S')}_#{SecureRandom.hex(3)}"
       @admin.exec(%(create database "#{name}"))
       target = @admin.with_database(name)
+      create_roles(backup.referenced_roles)
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       ok, err = backup.archive? ? pg_restore(backup, target, name) : psql_restore(backup, target)
       seconds = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(1)
@@ -36,13 +37,18 @@ module Pgdrill
       [st.success?, err]
     end
 
-    def psql_restore(backup, target)
-      backup.referenced_roles.each do |role|
+    # Roles are cluster-wide; on a throwaway server they vanish with it. On --target servers
+    # existing roles are left alone (duplicate_object) and new ones are NOLOGIN.
+    def create_roles(roles)
+      roles.each do |role|
         quoted = role.start_with?('"') ? role : %("#{role}")
         @admin.exec("do $$ begin create role #{quoted} nologin; exception when duplicate_object then null; end $$")
       rescue Db::QueryError
         nil # if the dump really needs it, the restore itself fails and says so
       end
+    end
+
+    def psql_restore(backup, target)
       err = +""
       status = Open3.popen3(target.env, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", "-") do |stdin, stdout, stderr, wait|
         readers = [Thread.new { stdout.read }, Thread.new { err << stderr.read }]

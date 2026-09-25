@@ -15,6 +15,9 @@ class BackupFileTest < Minitest::Test
     ALTER TABLE public.t OWNER TO postgres;
     ALTER SCHEMA public OWNER TO pg_database_owner;
     GRANT USAGE ON SCHEMA public TO CURRENT_USER;
+    CREATE POLICY own_rows ON public.t FOR SELECT TO authenticated, anon USING ((id > 0));
+    CREATE POLICY writers ON public.t FOR INSERT TO service_role WITH CHECK (true);
+    ALTER DEFAULT PRIVILEGES FOR ROLE migrator IN SCHEMA public GRANT SELECT ON TABLES TO reporting;
   SQL
 
   def with_file(name, bytes)
@@ -31,7 +34,15 @@ class BackupFileTest < Minitest::Test
       assert_equal :plain, b.format
       assert_equal "16.4", b.versions[:from]
       assert_equal 16, b.major
-      assert_equal ["app_owner", "reporting", '"Mixed Case"'], b.referenced_roles
+      assert_equal ["app_owner", "reporting", '"Mixed Case"', "authenticated", "anon", "service_role", "migrator"], b.referenced_roles
+    end
+  end
+
+  def test_required_major_covers_newer_pg_dump
+    with_file("db.sql", SQL.sub("pg_dump version 16.4", "pg_dump version 17.2")) do |p|
+      b = Pgdrill::BackupFile.new(p)
+      assert_equal 16, b.major
+      assert_equal 17, b.required_major
     end
   end
 

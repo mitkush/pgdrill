@@ -34,6 +34,21 @@ module Pgdrill
 
     def major = versions[:from].to_s[/\A\d+/]&.to_i
 
+    def pg_dump_major = versions[:by].to_s[/\A\d+/]&.to_i
+
+    # A newer pg_dump writes archive versions / SET commands an older server or pg_restore can't read,
+    # so the restore side must be at least as new as both the source server and pg_dump.
+    def required_major = [major, pg_dump_major].compact.max
+
+    # Schema-only SQL: for archives pg_restore renders just the DDL (cheap, no table data).
+    def each_ddl_line(&block)
+      return each_sql_line(&block) unless archive?
+      Open3.popen2("pg_restore", "--schema-only", "-f", "-", path, err: File::NULL) do |_in, out, wait|
+        out.each_line(&block)
+        wait.value # a truncated archive just yields fewer lines; the restore reports the damage
+      end
+    end
+
     def each_sql_line(&block)
       return enum_for(:each_sql_line) unless block
       if format == :plain_gz
@@ -43,14 +58,19 @@ module Pgdrill
       end
     end
 
-    # Plain-SQL dumps can't skip ownership/grants like pg_restore --no-owner, so the
-    # restorer pre-creates the roles they mention.
+    ROLE = /"[^"]+"|[\w$]+/
+    ROLE_LIST = /(?:#{ROLE})(?:, *(?:#{ROLE}))*/
+
+    # Roles the dump refers to. Row-level security policies (e.g. Supabase's `TO authenticated`)
+    # need their roles to exist even with --no-owner --no-privileges, and plain SQL can't skip
+    # ownership at all, so the restorer pre-creates these as NOLOGIN roles on the throwaway server.
     def referenced_roles
       roles = []
-      each_sql_line do |l|
-        next unless l.start_with?("ALTER ", "GRANT ", "REVOKE ")
-        l.scan(/OWNER TO ([^;]+);/) { roles << _1[0] }
-        l.scan(/\b(?:TO|FROM) ((?:"[^"]+"|[\w$]+)(?:, *(?:"[^"]+"|[\w$]+))*)(?: WITH GRANT OPTION)?;/) { roles.concat(_1[0].split(/, */)) }
+      each_ddl_line do |l|
+        next unless l.start_with?("ALTER ", "GRANT ", "REVOKE ", "CREATE POLICY ")
+        l.scan(/OWNER TO (#{ROLE});/) { roles << _1[0] }
+        l.scan(/FOR ROLE (#{ROLE_LIST})/) { roles.concat(_1[0].split(/, */)) }
+        l.scan(/\b(?:TO|FROM) (#{ROLE_LIST})(?: WITH GRANT OPTION)?(?=;| USING\b| WITH CHECK\b)/) { roles.concat(_1[0].split(/, */)) }
       end
       roles.map(&:strip).uniq.reject { |r| RESERVED_ROLES.include?(r.upcase) || r.delete('"').start_with?("pg_") }
     end

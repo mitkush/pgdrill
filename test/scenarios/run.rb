@@ -67,6 +67,13 @@ base = baseline
 snap = Pgdrill::Baseline.load(base)
 puts "#{snap['database']}: #{snap['tables'].size} tables, #{snap['schema'].size} schema objects, #{snap['sequences'].size} sequences\n\n"
 
+if (u = snap.dig("tables", "public.zz_unanalyzed"))
+  ok = u["method"] == "estimate"
+  RESULTS << { "scenario" => "never-analyzed large table is not counted on production", "expected" => "estimate",
+               "verdict" => u["method"], "correct" => ok }
+  puts format("%-7s %-52s → %s", ok ? "ok" : "WRONG", "never-analyzed large table not counted exactly", u["method"])
+end
+
 expect("A  healthy custom-format backup", drill(good, "--baseline", base), "PASS")
 expect("A2 healthy plain .sql backup", drill(pg_dump("good.sql", "-Fp"), "--baseline", base), "PASS")
 File.binwrite(path("good.sql.gz"), Zlib.gzip(File.binread(path("good.sql"))))
@@ -81,7 +88,7 @@ leaves = PROD.rows(<<~SQL).map { _1["t"] }
   select format('%I.%I', n.nspname, c.relname) as t
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where c.relkind = 'r' and not c.relispartition and #{Pgdrill::Inspector::USER_NS}
-     and c.relname <> 'zz_pgdrill_heartbeat'
+     and c.relname not in ('zz_pgdrill_heartbeat', 'zz_unanalyzed')
      and not exists (select 1 from pg_constraint k where k.confrelid = c.oid)
      and not exists (select 1 from pg_inherits i where i.inhparent = c.oid)
    order by c.reltuples desc, 1 limit 10

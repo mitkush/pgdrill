@@ -1,5 +1,6 @@
 require "fileutils"
 require "open3"
+require "securerandom"
 require "socket"
 require "tmpdir"
 
@@ -35,19 +36,26 @@ module Pgdrill
 
     def initialize(bindir: self.class.bindir)
       @bin = bindir
-      @major = `#{File.join(@bin, 'postgres')} --version`[/(\d+)(?:\.\d+)?/, 1].to_i
+      out, = Open3.capture2(File.join(@bin, "postgres"), "--version")
+      @major = out[/(\d+)(?:\.\d+)?/, 1].to_i
     end
 
+    # The restored data is a copy of production, so other local users must not be able to read it:
+    # password auth with a random secret, and the data directory is private (initdb uses 0700).
     def start
       @dir = Dir.mktmpdir("pgdrill-")
       @port = free_port
-      run!("initdb", "-D", data, "-U", "postgres", "--auth=trust", "--no-locale", "-E", "UTF8")
+      @password = SecureRandom.hex(24)
+      pwfile = File.join(@dir, "pw")
+      File.write(pwfile, @password, perm: 0o600)
+      run!("initdb", "-D", data, "-U", "postgres", "--auth=scram-sha-256", "--pwfile", pwfile, "--no-locale", "-E", "UTF8")
+      File.delete(pwfile)
       opts = SETTINGS.merge("port" => @port.to_s).map { |k, v| "-c #{k}=#{v}" }.join(" ")
       run!("pg_ctl", "-D", data, "-l", File.join(@dir, "server.log"), "-o", opts, "-w", "-t", "60", "start")
       self
     end
 
-    def url = "postgresql://postgres@127.0.0.1:#{@port}/postgres"
+    def url(database = "postgres") = "postgresql://postgres:#{@password}@127.0.0.1:#{@port}/#{database}"
 
     def stop
       return unless @dir

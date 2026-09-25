@@ -9,7 +9,7 @@ Gem::Specification.new do |s|
   s.authors = ["mitkush"]
   s.homepage = "https://github.com/mitkush/pgdrill"
   s.license = "MIT"
-  s.required_ruby_version = ">= 3.0"
+  s.required_ruby_version = ">= 3.1"
   s.files = Dir["lib/**/*.rb", "exe/*", "README.md", "LICENSE"]
   s.bindir = "exe"
   s.executables = ["pgdrill"]

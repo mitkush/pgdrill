@@ -46,12 +46,16 @@ module Pgdrill
       SQL
     end
 
+    # estimate is null when Postgres has never analyzed the table (reltuples = -1) and has no live
+    # counter (standbys don't replicate pg_stat counters); bytes lets callers judge size anyway.
     def tables
       @db.rows(<<~SQL)
         select format('%I.%I', n.nspname, c.relname) as t,
                has_table_privilege(c.oid, 'SELECT') as readable,
-               c.reltuples::bigint as estimate
+               case when c.reltuples >= 0 then c.reltuples::bigint else nullif(s.n_live_tup, 0) end as estimate,
+               pg_relation_size(c.oid) as bytes
           from pg_class c join pg_namespace n on n.oid = c.relnamespace
+          left join pg_stat_all_tables s on s.relid = c.oid
          where c.relkind = 'r' and #{USER_NS}
       SQL
     end
@@ -62,7 +66,7 @@ module Pgdrill
 
     def estimates(names)
       return {} if names.empty?
-      tables.select { names.include?(_1["t"]) }.to_h { [_1["t"], [_1["estimate"], 0].max] }
+      tables.select { names.include?(_1["t"]) }.to_h { [_1["t"], _1["estimate"]] }
     end
 
     # indexed_only keeps production probes cheap: max() on a btree-leading column is an index lookup.

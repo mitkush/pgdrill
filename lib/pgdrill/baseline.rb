@@ -20,7 +20,7 @@ module Pgdrill
         if like
           readable.map { _1["t"] }.partition { like.dig("tables", _1, "method") != "estimate" }
         else
-          readable.partition { _1["estimate"] < exact_row_limit }.map { |part| part.map { _1["t"] } }
+          readable.partition { small?(_1, exact_row_limit) }.map { |part| part.map { _1["t"] } }
         end
 
       counts = inspector.exact_counts(exact_names).transform_values { { "rows" => _1, "method" => "exact" } }
@@ -42,7 +42,14 @@ module Pgdrill
       }
     end
 
-    def newest(snapshot) = snapshot.fetch("freshness", {}).values.compact.map { Time.parse(_1) }.max
+    # Exact count(*) only when it's cheap. Without a row estimate, judge by size on disk
+    # (~100 bytes/row) so a big never-analyzed table is never fully scanned on production.
+    def small?(table, exact_row_limit)
+      return table["estimate"] < exact_row_limit if table["estimate"]
+      table["bytes"].to_i < exact_row_limit * 100
+    end
+
+    def newest(snapshot) =snapshot.fetch("freshness", {}).values.compact.map { Time.parse(_1) }.max
 
     def save(snapshot, path) = File.write(path, JSON.pretty_generate(snapshot))
 

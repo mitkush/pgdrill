@@ -52,7 +52,7 @@ module Pgdrill
       out << line("restore", e["restore_ok"] ? "ok in #{Duration.human(e['restore_seconds'])}" : "FAILED after #{Duration.human(e['restore_seconds'])}")
       if e["restore_ok"]
         out << line("schema", @baseline ? status("schema", "#{e['schema_objects']} objects match production") : "not compared (no baseline)")
-        out << line("rows", @baseline ? status("rows", "#{e['tables']} tables within tolerance") : "#{e['tables']} tables restored")
+        out << line("rows", @baseline ? status("rows", "#{e['tables']} tables within tolerance") : "#{e['tables']} table#{'s' unless e['tables'] == 1} restored")
         out << line("freshness", status("freshness", e["newest_data"] ? "newest data #{e['newest_data']} (#{Duration.human(e['data_age_seconds'])} old)" : "no timestamp columns found"))
         out << line("sequences", status("sequences", "#{@restored['sequences'].size} checked"))
         out << line("amcheck", status("amcheck", @restored.dig("amcheck", "available") ? "#{e['indexes_checked']} indexes clean" : "not run"))

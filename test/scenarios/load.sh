@@ -14,6 +14,7 @@ case "$1" in
     # a recently added table with no dependents, like real apps grow
     psql -X -q -d pagila -c "create table audit_log (id bigserial primary key, action text not null, created_at timestamptz not null default now())" \
                           -c "insert into audit_log (action) select 'seed' from generate_series(1, 1000)" -c "analyze"
+    bash "$(dirname "$0")/edge-cases.sql.sh" pagila
     ;;
   gitlab)
     curl -sfL -o structure.sql https://gitlab.com/gitlab-org/gitlab/-/raw/master/db/structure.sql
