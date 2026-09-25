@@ -65,7 +65,11 @@ module Pgdrill
       o = { jobs: 4, format: "text", amcheck: true, lag_tolerance: Checks::DEFAULTS[:lag_tolerance],
             exact_row_limit: Baseline::DEFAULT_EXACT_ROW_LIMIT, statement_timeout: "30s" }
       parser = OptionParser.new do |p|
-        p.banner = "Usage: pgdrill run BACKUP [options]\n\nBACKUP: pg_dump custom (-Fc), directory (-Fd) or tar (-Ft) archive, or plain .sql / .sql.gz"
+        p.banner = "Usage: pgdrill run BACKUP [options]\n\n" \
+                   "BACKUP: pg_dump custom (-Fc), directory (-Fd) or tar (-Ft) archive, or plain .sql / .sql.gz, given as\n" \
+                   "  a local path, s3://bucket/key (s3://bucket/prefix/ = newest object; AWS_* env credentials,\n" \
+                   "  AWS_ENDPOINT_URL for R2/B2/other S3-compatible stores) or an https:// (e.g. presigned) URL"
+        p.on("--latest", "Treat an s3:// location as a prefix and drill the newest backup under it") { o[:latest] = true }
         p.on("--baseline FILE", "Compare against a baseline written by `pgdrill baseline`") { o[:baseline] = _1 }
         p.on("--baseline-db URL", "Capture the baseline live from production/replica, read-only (or PGDRILL_BASELINE_DB).",
              "Only for drills right after the backup: data written since then counts against --lag-tolerance") { o[:baseline_db] = _1 }
@@ -78,6 +82,8 @@ module Pgdrill
         p.on("--sha256", "Include the backup's SHA-256 in the report") { o[:sha256] = true }
         p.on("--format FORMAT", %w[text json], "text (default) or json") { o[:format] = _1 }
         p.on("--output FILE", "Also write the JSON report to FILE") { o[:output] = _1 }
+        p.on("--summary FILE", "Append a Markdown report to FILE (e.g. $GITHUB_STEP_SUMMARY)") { o[:summary] = _1 }
+        p.on("--fail-on-warn", "Exit 1 on WARN too, not only on FAIL") { o[:fail_on_warn] = true }
         p.on("--keep", "Keep the restored database (and server) for inspection") { o[:keep] = true }
       end
       parser.parse!(argv)
@@ -86,16 +92,23 @@ module Pgdrill
       path = argv.shift or raise Error, "run needs a BACKUP path\n\n#{parser.help}"
       raise Error, "use either --baseline or --baseline-db, not both" if o[:baseline] && o[:baseline_db]
 
-      backup = BackupFile.new(path)
       base, base_source = load_baseline(o)
-      report = drill(backup, base, base_source, o)
+      fetched = Source.fetch(path, latest: o[:latest], log: o[:format] == "text" ? @err.method(:puts) : nil)
+      backup = BackupFile.new(fetched.path)
+      report = drill(backup, base, base_source, o, fetched)
 
       @out.puts(o[:format] == "json" ? report.to_json : report.to_text)
       File.write(o[:output], report.to_json) if o[:output]
-      report.verdict == "FAIL" ? EXIT_FAIL : EXIT_OK
+      File.open(o[:summary], "a") { _1.puts(report.to_markdown) } if o[:summary]
+      failing = o[:fail_on_warn] ? %w[FAIL WARN] : %w[FAIL]
+      failing.include?(report.verdict) ? EXIT_FAIL : EXIT_OK
+    ensure
+      if fetched&.dir
+        o[:keep] ? @err.puts("kept downloaded backup #{fetched.path}") : fetched.cleanup
+      end
     end
 
-    def drill(backup, base, base_source, o)
+    def drill(backup, base, base_source, o, fetched)
       cluster = nil
       admin =
         if o[:target]
@@ -122,7 +135,7 @@ module Pgdrill
       end
       findings = Checks.run(restore: result, restored: restored, baseline: base,
                             max_age: o[:max_age], lag_tolerance: o[:lag_tolerance])
-      Report.new(backup: backup, baseline_source: base_source, baseline: base, restore: result,
+      Report.new(backup: backup, source: fetched, baseline_source: base_source, baseline: base, restore: result,
                  restored: restored, findings: findings, options: o)
     ensure
       if o[:keep] && result

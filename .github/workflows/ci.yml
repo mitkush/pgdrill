@@ -72,6 +72,68 @@ jobs:
           name: scenarios-${{ matrix.db }}-pg${{ matrix.pg }}
           path: tmp/scenarios/results-*.json
 
+  s3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: rustfsadmin
+      AWS_SECRET_ACCESS_KEY: rustfsadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+    steps:
+      - uses: actions/checkout@v5
+      - name: S3-compatible server (RustFS) + Postgres 16 with pagila
+        run: |
+          docker run -d --name rustfs -p 9000:9000 rustfs/rustfs:1.0.0 > /dev/null
+          for i in $(seq 60); do aws s3 ls > /dev/null 2>&1 && break; sleep 1; done
+          aws s3 ls > /dev/null || { docker logs rustfs | tail -20; exit 1; }
+          PG_BIN=/usr/lib/postgresql/16/bin
+          echo "$PG_BIN" >> $GITHUB_PATH
+          export PATH=$PG_BIN:$PATH
+          bash test/scenarios/start-prod.sh $PG_BIN
+          bash test/scenarios/load.sh pagila
+      - name: S3 and URL sources
+        run: bash test/scenarios/s3.sh | tee -a $GITHUB_STEP_SUMMARY; exit ${PIPESTATUS[0]}
+
+  # The GitHub Action itself, used the way a user's workflow would.
+  action:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Production (Postgres 16 + pagila), a good and a broken backup, a baseline
+        run: |
+          PG_BIN=/usr/lib/postgresql/16/bin
+          export PATH=$PG_BIN:$PATH
+          bash test/scenarios/start-prod.sh $PG_BIN
+          bash test/scenarios/load.sh pagila
+          ruby exe/pgdrill baseline --db postgresql://postgres@127.0.0.1:55432/pagila -o baseline.json
+          pg_dump -h 127.0.0.1 -p 55432 -U postgres -Fc -d pagila -f good.dump
+          head -c 300000 good.dump > broken.dump
+      - name: Good backup (default postgres-version 17 restores a 16 backup)
+        id: good
+        uses: ./
+        with:
+          backup: good.dump
+          baseline: baseline.json
+      - name: Broken backup
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          backup: broken.dump
+          baseline: baseline.json
+          postgres-version: "16"
+      - name: Outputs are right
+        env:
+          GOOD: ${{ steps.good.outputs.verdict }}
+          BROKEN: ${{ steps.broken.outputs.verdict }}
+          BROKEN_OUTCOME: ${{ steps.broken.outcome }}
+          REPORT: ${{ steps.good.outputs.report }}
+        run: |
+          echo "good=$GOOD broken=$BROKEN broken_outcome=$BROKEN_OUTCOME report=$REPORT"
+          [ "$GOOD" = PASS ] && [ "$BROKEN" = FAIL ] && [ "$BROKEN_OUTCOME" = failure ] && [ -s "$REPORT" ]
+
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 20

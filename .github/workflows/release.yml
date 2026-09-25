@@ -1,0 +1,103 @@
+name: release
+# Push a tag like v0.2.0 to publish. Run manually (workflow_dispatch) for a dry run that builds
+# everything but publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          version=$(ruby -r ./lib/pgdrill/version -e 'print Pgdrill::VERSION')
+          echo "version=$version" >> $GITHUB_OUTPUT
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match Pgdrill::VERSION $version"; exit 1; }
+            echo "publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "publish=false" >> $GITHUB_OUTPUT
+            echo "dry run for $version: building, not publishing"
+          fi
+
+  images:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - if: needs.version.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: PG_MAJOR=${{ matrix.pg }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.version.outputs.publish == 'true' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/pgdrill:pg${{ matrix.pg }}
+            ghcr.io/${{ github.repository_owner }}/pgdrill:pg${{ matrix.pg }}-${{ needs.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=pgdrill with a Postgres ${{ matrix.pg }} restore server
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+
+  gem:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - run: gem build pgdrill.gemspec
+      - uses: actions/upload-artifact@v4
+        with: { name: gem, path: "*.gem" }
+      - name: GitHub release with the gem attached
+        if: needs.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" ./*.gem --title "pgdrill $GITHUB_REF_NAME" --generate-notes
+
+  # Off until trusted publishing is set up on rubygems.org and the repo variable
+  # RUBYGEMS_TRUSTED_PUBLISHING is set to "true".
+  rubygems:
+    needs: [version, gem, images]
+    if: needs.version.outputs.publish == 'true' && vars.RUBYGEMS_TRUSTED_PUBLISHING == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: "3.3", bundler-cache: true }
+      - uses: rubygems/release-gem@v1

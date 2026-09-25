@@ -14,6 +14,8 @@ module Pgdrill
   autoload :Report, "pgdrill/report"
   autoload :Duration, "pgdrill/duration"
   autoload :CLI, "pgdrill/cli"
+  autoload :S3, "pgdrill/s3"
+  autoload :Source, "pgdrill/source"
 end
 
 $LOAD_PATH.unshift(__dir__) unless $LOAD_PATH.include?(__dir__)

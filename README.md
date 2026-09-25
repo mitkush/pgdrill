@@ -78,6 +78,49 @@ missing Postgres binaries, restore server too old).
 No baseline? `pgdrill run nightly.dump --max-age 26h` still checks that the
 backup restores, is recent, has intact indexes and sane sequences.
 
+### Where the backup can live
+
+```sh
+pgdrill run nightly.dump                          # local file
+pgdrill run s3://backups/db/2026-09-25.dump       # one S3 object
+pgdrill run s3://backups/db/                      # the newest object under a prefix (or add --latest)
+pgdrill run "$(aws s3 presign s3://backups/db/x.dump)"   # any https:// URL, e.g. presigned
+```
+
+`s3://` reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional
+`AWS_SESSION_TOKEN` and `AWS_REGION`; set `AWS_ENDPOINT_URL` for Cloudflare R2,
+Backblaze B2 or another S3-compatible store (tested against RustFS). For IAM
+roles or SSO, pass a presigned URL instead. Downloads go to a private temporary
+directory that is deleted after the run, and URL query strings (where presigned
+signatures live) are never printed or written to reports.
+
+### In GitHub Actions
+
+```yaml
+on:
+  schedule: [{ cron: "0 6 * * *" }]   # every morning, after the nightly backup
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mitkush/pgdrill@main    # pin a release tag once one exists
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_READ_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_READ_SECRET }}
+          AWS_REGION: eu-west-1
+        with:
+          backup: s3://my-backups/nightly/
+          baseline-db: ${{ secrets.REPLICA_READONLY_URL }}
+          max-age: 26h
+```
+
+The step fails when the backup fails the drill, writes the results to the job
+summary, and sets `verdict` (PASS/WARN/FAIL) and `report` (JSON path) outputs.
+It installs the requested `postgres-version` (default 17, which can restore
+backups from any older version) on the Linux runner; no image or gem needed.
+A live `baseline-db` here is taken after the backup, so allow for writes since
+then with `lag-tolerance` (or upload a baseline file taken just before the backup).
+
 ### Without Docker
 
 ```sh
@@ -99,7 +142,8 @@ Tested with Postgres 15, 16 and 17.
 (`.sql`) and gzipped plain SQL (`.sql.gz`).
 
 Not yet: physical backups (pgBackRest, WAL-G, `pg_basebackup`), managed-database
-snapshots (RDS, Cloud SQL), fetching from S3, MySQL.
+snapshots (RDS, Cloud SQL), MySQL. Directory-format (`-Fd`) backups only from
+local paths, since they are folders rather than single objects.
 
 ## Safety
 
@@ -131,7 +175,8 @@ grant pg_read_all_data to pgdrill;  -- Postgres 14+
 
 `--format json` (or `--output report.json`) records the measured restore time
 and data age with timestamps: evidence that restore testing happened, which
-audits such as SOC 2 and ISO 27001 ask for.
+audits such as SOC 2 and ISO 27001 ask for. `--summary FILE` appends a Markdown
+version (e.g. to `$GITHUB_STEP_SUMMARY`). `--fail-on-warn` makes warnings fail too.
 
 ## Known limitations
 

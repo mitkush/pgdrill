@@ -1,0 +1,64 @@
+name: pgdrill backup drill
+description: Restore a Postgres backup into a throwaway server and prove it is complete, correct and fresh
+author: mitkush
+branding:
+  icon: database
+  color: blue
+
+inputs:
+  backup:
+    description: "Backup to drill: a path, s3://bucket/key, s3://bucket/prefix/ (newest object), or an https:// URL. S3 credentials come from the job's AWS_* environment."
+    required: true
+  baseline:
+    description: Path to a baseline JSON written by `pgdrill baseline` (recommended)
+    required: false
+    default: ""
+  baseline-db:
+    description: "Capture the baseline live from this read-only connection URL instead (pass it from a secret)"
+    required: false
+    default: ""
+  max-age:
+    description: "Fail if the newest restored data is older than this, e.g. 26h"
+    required: false
+    default: ""
+  lag-tolerance:
+    description: "How far restored data may trail the baseline (default 5m)"
+    required: false
+    default: ""
+  postgres-version:
+    description: "Postgres major version for the throwaway server; must be at least the backup's (source server and pg_dump)"
+    required: false
+    default: "17"
+  fail-on-warn:
+    description: Fail the step on WARN as well as FAIL
+    required: false
+    default: "false"
+
+outputs:
+  verdict:
+    description: PASS, WARN or FAIL
+    value: ${{ steps.drill.outputs.verdict }}
+  report:
+    description: Path to the JSON report (restore time, data age, findings)
+    value: ${{ steps.drill.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - name: Postgres ${{ inputs.postgres-version }} for the throwaway server
+      shell: bash
+      env:
+        PG_VERSION: ${{ inputs.postgres-version }}
+      run: bash "$GITHUB_ACTION_PATH/action/setup-postgres.sh"
+    - name: Drill the backup
+      id: drill
+      shell: bash
+      # Inputs travel as environment variables, never interpolated into the script.
+      env:
+        INPUT_BACKUP: ${{ inputs.backup }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        PGDRILL_BASELINE_DB: ${{ inputs.baseline-db }}
+        INPUT_MAX_AGE: ${{ inputs.max-age }}
+        INPUT_LAG_TOLERANCE: ${{ inputs.lag-tolerance }}
+        INPUT_FAIL_ON_WARN: ${{ inputs.fail-on-warn }}
+      run: bash "$GITHUB_ACTION_PATH/action/run.sh"
