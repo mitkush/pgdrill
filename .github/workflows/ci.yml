@@ -44,7 +44,7 @@ jobs:
       - name: Postgres ${{ matrix.pg }} from packages
         if: matrix.db != 'regression'
         run: |
-          [ -x /usr/lib/postgresql/${{ matrix.pg }}/bin/initdb ] || sudo apt-get install -y -q postgresql-${{ matrix.pg }} > /dev/null
+          [ -x /usr/lib/postgresql/${{ matrix.pg }}/bin/initdb ] || { sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null && sudo apt-get install -y -q postgresql-${{ matrix.pg }} > /dev/null; }
           echo "PG_BIN=/usr/lib/postgresql/${{ matrix.pg }}/bin" >> $GITHUB_ENV
       - name: Postgres ${{ matrix.pg }} from source (the regression suite needs its build tree)
         if: matrix.db == 'regression'
@@ -76,6 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         pg: [15, 16, 17]
     steps:
@@ -86,7 +87,7 @@ jobs:
         run: |
           set -e
           PG_BIN=/usr/lib/postgresql/${{ matrix.pg }}/bin
-          [ -x $PG_BIN/initdb ] || sudo apt-get install -y -q postgresql-${{ matrix.pg }} > /dev/null
+          [ -x $PG_BIN/initdb ] || { sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null && sudo apt-get install -y -q postgresql-${{ matrix.pg }} > /dev/null; }
           export PATH=$PG_BIN:$PATH
           bash test/scenarios/start-prod.sh $PG_BIN
           bash test/scenarios/load.sh pagila

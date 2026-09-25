@@ -52,8 +52,11 @@ module Pgdrill
         l.scan(/OWNER TO ([^;]+);/) { roles << _1[0] }
         l.scan(/\b(?:TO|FROM) ((?:"[^"]+"|[\w$]+)(?:, *(?:"[^"]+"|[\w$]+))*)(?: WITH GRANT OPTION)?;/) { roles.concat(_1[0].split(/, */)) }
       end
-      roles.map(&:strip).uniq - %w[PUBLIC postgres]
+      roles.map(&:strip).uniq.reject { |r| RESERVED_ROLES.include?(r.upcase) || r.delete('"').start_with?("pg_") }
     end
+
+    # pg_* names are reserved/built in (e.g. pg_database_owner owns public on Postgres 15+).
+    RESERVED_ROLES = %w[PUBLIC POSTGRES CURRENT_USER SESSION_USER CURRENT_ROLE].freeze
 
     private
 

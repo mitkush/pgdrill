@@ -13,6 +13,8 @@ class BackupFileTest < Minitest::Test
     GRANT SELECT ON TABLE public.t TO reporting, "Mixed Case";
     REVOKE ALL ON TABLE public.t FROM PUBLIC;
     ALTER TABLE public.t OWNER TO postgres;
+    ALTER SCHEMA public OWNER TO pg_database_owner;
+    GRANT USAGE ON SCHEMA public TO CURRENT_USER;
   SQL
 
   def with_file(name, bytes)

@@ -40,6 +40,8 @@ module Pgdrill
       backup.referenced_roles.each do |role|
         quoted = role.start_with?('"') ? role : %("#{role}")
         @admin.exec("do $$ begin create role #{quoted} nologin; exception when duplicate_object then null; end $$")
+      rescue Db::QueryError
+        nil # if the dump really needs it, the restore itself fails and says so
       end
       err = +""
       status = Open3.popen3(target.env, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", "-") do |stdin, stdout, stderr, wait|
