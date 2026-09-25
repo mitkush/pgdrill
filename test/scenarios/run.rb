@@ -104,6 +104,10 @@ picked = leaves.first(5).lazy.map do |t|
 end.find(&:itself)
 picked ? expect("C  table missing, restore succeeds (#{picked[0]})", picked[1], "FAIL", "schema") : skip("C  table missing", "no table can be excluded cleanly")
 
+# A missing table whose indexed timestamp feeds the freshness check (this once crashed pgdrill).
+expect("C3 missing table with an indexed timestamp",
+       drill(pg_dump("no_heartbeat.dump", "-Fc", "-T", "public.zz_pgdrill_heartbeat"), "--baseline", base), "FAIL", "schema")
+
 nonempty = leaves.select { snap.dig("tables", _1, "rows").to_i.positive? }
 picked = nonempty.first(5).lazy.map do |t|
   r = drill(pg_dump("no_data.dump", "-Fc", "--exclude-table-data=#{t}"), "--baseline", base)

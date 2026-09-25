@@ -135,7 +135,7 @@ jobs:
         with:
           backup: s3://drill/nightly/
           baseline: s3://drill/baselines/
-          max-age: 26000h          # pagila's indexed timestamps are from 2022
+          max-age: 50000h          # pagila's indexed timestamps are from 2022 (~1,500 days old)
           config: pgdrill.yml
           postgres-version: "16"
       - name: Guide example passed, custom check ran

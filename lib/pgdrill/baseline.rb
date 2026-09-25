@@ -26,7 +26,15 @@ module Pgdrill
       counts = inspector.exact_counts(exact_names).transform_values { { "rows" => _1, "method" => "exact" } }
       inspector.estimates(estimate_names).each { |t, n| counts[t] = { "rows" => n, "method" => "estimate" } }
 
-      fresh_cols = like ? like.fetch("freshness", {}).keys.map { _1.split("|", 2) } : inspector.freshness_columns(indexed_only: indexed_freshness)
+      fresh_cols =
+        if like
+          # Only columns that exist in this copy: a table missing from the backup is the schema
+          # check's finding, not a reason to crash while measuring freshness.
+          present = inspector.freshness_columns(indexed_only: false)
+          like.fetch("freshness", {}).keys.map { _1.split("|", 2) } & present
+        else
+          inspector.freshness_columns(indexed_only: indexed_freshness)
+        end
 
       {
         "format" => FORMAT,
