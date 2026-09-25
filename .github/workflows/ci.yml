@@ -208,13 +208,14 @@ jobs:
           export PATH=$PG_BIN:$PATH
           bash test/scenarios/start-prod.sh $PG_BIN
           bash test/scenarios/load.sh geo
-          pg_dump -h 127.0.0.1 -p 55432 -U postgres -Fc -d geo -f geo.dump && chmod a+r geo.dump
       - name: Scenarios on the geo database
         env:
           PGDRILL_SCENARIO_DB: postgresql://postgres@127.0.0.1:55432/geo
         run: bundle exec rake scenarios | tee -a $GITHUB_STEP_SUMMARY; exit ${PIPESTATUS[0]}
       - name: Base image refuses with a fix (exit 2), -extras image drills it
         run: |
+          # back up after the scenarios ran, so production and backup agree (they added a table)
+          pg_dump -h 127.0.0.1 -p 55432 -U postgres -Fc -d geo -f geo.dump && chmod a+r geo.dump
           docker build -q -f docker/Dockerfile --build-arg PG_MAJOR=16 -t pgdrill:pg16 . > /dev/null
           docker build -q -f docker/Dockerfile --build-arg PG_MAJOR=16 --build-arg EXTRAS=1 -t pgdrill:pg16-extras . > /dev/null
           set +e
