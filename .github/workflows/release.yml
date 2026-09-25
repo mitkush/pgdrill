@@ -42,7 +42,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17]
+        pg: [15, 16, 17, 18]
+        extras: ["", "1"]
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3
@@ -57,15 +58,17 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          build-args: PG_MAJOR=${{ matrix.pg }}
+          build-args: |
+            PG_MAJOR=${{ matrix.pg }}
+            EXTRAS=${{ matrix.extras }}
           platforms: linux/amd64,linux/arm64
           push: ${{ needs.version.outputs.publish == 'true' }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/pgdrill:pg${{ matrix.pg }}
-            ghcr.io/${{ github.repository_owner }}/pgdrill:pg${{ matrix.pg }}-${{ needs.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/pgdrill:pg${{ matrix.pg }}${{ matrix.extras && '-extras' || '' }}
+            ghcr.io/${{ github.repository_owner }}/pgdrill:pg${{ matrix.pg }}${{ matrix.extras && '-extras' || '' }}-${{ needs.version.outputs.version }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.description=pgdrill with a Postgres ${{ matrix.pg }} restore server
+            org.opencontainers.image.description=pgdrill with a Postgres ${{ matrix.pg }} restore server${{ matrix.extras && ' plus PostGIS and pgvector' || '' }}
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
 

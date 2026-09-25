@@ -60,9 +60,11 @@ module Pgdrill
     end
 
     # Newest non-empty object under the prefix: the usual "drill last night's backup" case.
-    def latest(bucket, prefix)
+    # skip: keys to ignore, e.g. baseline .json files stored next to the dumps.
+    def latest(bucket, prefix, skip: nil)
       # LastModified has 1-second resolution; ties go to the lexically last key (date-named backups sort right).
-      pick = list(bucket, prefix).reject { _1.size.zero? || _1.key.end_with?("/") }.max_by { [_1.last_modified, _1.key] }
+      candidates = list(bucket, prefix).reject { _1.size.zero? || _1.key.end_with?("/") || (skip && _1.key.match?(skip)) }
+      pick = candidates.max_by { [_1.last_modified, _1.key] }
       raise Error, "no backups found under s3://#{bucket}/#{prefix}" unless pick
       pick
     end

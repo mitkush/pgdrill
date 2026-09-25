@@ -25,13 +25,23 @@ module Pgdrill
       @versions ||= if archive?
         # An unreadable table of contents is a broken backup, not a tool error: let the restore report it.
         # The exception is an archive format newer than this pg_restore understands (written by a newer pg_dump).
-        toc, err, _st = Open3.capture3("pg_restore", "-l", path)
+        toc, err = table_of_contents
         { from: toc[/Dumped from database version: (\S+)/, 1], by: toc[/Dumped by pg_dump version: (\S+)/, 1],
           newer_archive: err[/unsupported version \(([\d.]+)\) in file header/, 1] }
       else
         head = each_sql_line.first(40).join
         { from: head[/Dumped from database version (\S+)/, 1], by: head[/Dumped by pg_dump version (\S+)/, 1] }
       end
+    end
+
+    # Extensions the restore server must provide (checked before restoring, so a missing
+    # PostGIS/pgvector is reported as a setup problem rather than a broken backup).
+    def required_extensions
+      @required_extensions ||= if archive?
+        table_of_contents.first.scan(/\bEXTENSION - ("[^"]+"|\S+)/).flatten
+      else
+        each_sql_line.filter_map { _1[/\ACREATE EXTENSION (?:IF NOT EXISTS )?("[^"]+"|[\w-]+)/, 1] }
+      end.map { _1.delete('"') }.uniq - ["plpgsql"]
     end
 
     def major = versions[:from].to_s[/\A\d+/]&.to_i
@@ -81,6 +91,10 @@ module Pgdrill
     RESERVED_ROLES = %w[PUBLIC POSTGRES CURRENT_USER SESSION_USER CURRENT_ROLE].freeze
 
     private
+
+    def table_of_contents
+      @toc ||= Open3.capture3("pg_restore", "-l", path).first(2)
+    end
 
     def detect
       return :directory if File.directory?(path) && File.exist?(File.join(path, "toc.dat"))

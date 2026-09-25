@@ -67,13 +67,17 @@ docker run --rm -v "$PWD:/work:ro" ghcr.io/mitkush/pgdrill:pg16 \
   run /work/nightly.dump --baseline /work/baseline.json --max-age 26h
 ```
 
-Pick the image tag for the Postgres major version your backup came from
-(`pg15`, `pg16`, `pg17`); it must be at least as new as both the source server
-and the `pg_dump` that wrote the backup, and pgdrill stops with exit code 2 if it isn't.
+Pick the image for the Postgres major version your backup came from (`pg15` to
+`pg18`); it must be at least as new as both the source server and the `pg_dump`
+that wrote the backup, and pgdrill stops with exit code 2 if it isn't. Backups
+from older servers (e.g. 13 or 14, still common on hosted Postgres) restore on
+a newer image. Use the `-extras` image (e.g. `pg16-extras`) if the database uses
+PostGIS or pgvector.
 
 Exit codes: `0` = PASS (or WARN: nothing critical, but see the warnings), `1` =
 the backup failed a check, `2` = pgdrill itself couldn't run (bad arguments,
-missing Postgres binaries, restore server too old).
+missing Postgres binaries, restore server too old, an extension the restore
+server lacks, a download cut off in transit).
 
 No baseline? `pgdrill run nightly.dump --max-age 26h` still checks that the
 backup restores, is recent, has intact indexes and sane sequences.
@@ -116,9 +120,10 @@ jobs:
 
 The step fails when the backup fails the drill, writes the results to the job
 summary, and sets `verdict` (PASS/WARN/FAIL) and `report` (JSON path) outputs.
-It installs the requested `postgres-version` (default 17, which also restores
+It installs the requested `postgres-version` (default 18, which also restores
 backups made by older versions) on the runner and runs pgdrill from the action
-itself; no image or gem needed. It needs a Linux runner with Ruby, which
+itself; no image or gem needed. If the database uses PostGIS or pgvector, add
+`extensions: postgis, vector`; a `config` input takes a pgdrill.yml. It needs a Linux runner with Ruby, which
 GitHub-hosted `ubuntu-*` runners have.
 A live `baseline-db` here is taken after the backup, so allow for writes since
 then with `lag-tolerance` (or upload a baseline file taken just before the backup).
@@ -136,7 +141,57 @@ This needs Postgres server binaries (`initdb`, `pg_ctl`, `pg_restore`) on your
 roles the backup references are created there as `NOLOGIN`, and the restored
 database is dropped afterwards unless you pass `--keep`).
 
-Tested with Postgres 15, 16 and 17.
+Tested with Postgres 15, 16, 17 and 18 as the restore server, and with backups
+made on a Postgres 14 server by its own `pg_dump`.
+
+## Extensions
+
+pgdrill reads which extensions a backup needs before restoring it. If the
+restore server lacks one, the drill stops with exit code 2 and the fix (the
+`-extras` image, the Action's `extensions` input, or the package to install)
+instead of blaming the backup. The `-extras` images and the Action support
+PostGIS and pgvector; for anything else (e.g. Supabase's own extensions),
+restore into a server that has them with `--target`.
+
+## Custom checks and tolerances
+
+Know something that must be true of every good backup? Say it in SQL:
+
+```yaml
+# pgdrill.yml, used with --config pgdrill.yml (or PGDRILL_CONFIG)
+checks:
+  - name: yesterday's orders are in the backup
+    sql: select count(*) from orders where created_at > now() - interval '1 day'
+    expect: "> 0"          # > >= < <= = != with a number, or true/false
+rows:
+  tolerance: 5%            # allowed row-count drift for exactly counted tables (default 5%)
+  estimate_tolerance: 25%  # for large tables measured by estimate (default 25%)
+  tables:
+    public.events: 50%     # a high-churn table
+ignore_tables: [public.sessions]   # skipped by the row check
+```
+
+Checks run against the restored copy only; the first column of the first row
+is compared with `expect`. A check whose query errors fails the drill, since a
+query that works on production should work on a faithful restore. A table that
+comes back empty always fails unless it's in `ignore_tables`. Unknown keys are
+errors, so a typo can't silently turn a check off.
+
+## Alerts
+
+```sh
+pgdrill run s3://backups/db/ --baseline baseline.json --webhook "$SLACK_WEBHOOK_URL"
+```
+
+`--webhook URL` (or `PGDRILL_WEBHOOK`) posts `{"text": "pgdrill FAIL for …"}`,
+which Slack incoming webhooks accept, on WARN, FAIL, and when the drill can't
+run at all (e.g. expired credentials). `--notify always` also reports passes;
+`--webhook-format json` posts the full JSON report instead. The webhook URL is
+never printed. A failing webhook only produces a warning; it doesn't change the
+exit code.
+
+See [docs/guides.md](docs/guides.md) for complete setups: nightly cron with
+Docker, GitHub Actions, backups in S3, and notes for hosted Postgres.
 
 ## Supported backups
 
@@ -185,7 +240,9 @@ version (e.g. to `$GITHUB_STEP_SUMMARY`). `--fail-on-warn` makes warnings fail t
 - Without a row estimate on a replica (a never-analyzed table), a large table's
   row count is recorded as unknown and not compared.
 - IDs generated by functions (e.g. Mastodon's snowflake `timestamp_id()`) are
-  not covered by the sequence check.
+  not checked by the sequence check. For timestamp-based IDs like Mastodon's
+  that's not a gap: each new ID embeds the current time, so it can't collide
+  with restored rows even if the sequence position were lost.
 - Ownership, grants and tablespaces are not restored (`--no-owner
   --no-privileges --no-tablespaces`), so they are not verified.
 - Freshness needs at least one timestamp column with an index.
@@ -195,9 +252,11 @@ version (e.g. to `$GITHUB_STEP_SUMMARY`). `--fail-on-warn` makes warnings fail t
 Every change runs the [scenario harness](test/scenarios/run.rb): it breaks
 real backups on purpose (truncated file, missing table, missing data, lost
 sequence positions, stale backup) and requires each to be classified
-correctly, on Pagila (Postgres 15/16/17), GitLab's production schema
-(1,357 tables), a real Mastodon database and Postgres's own regression-test
-database.
+correctly, on Pagila (Postgres 15/16/17/18, and backups from a Postgres 14
+server), GitLab's production schema (1,357 tables), a real Mastodon database,
+a PostGIS + pgvector database and Postgres's own regression-test database.
+Custom checks, ignored tables and webhook alerts run in the same harness, and
+S3 sources are tested against a real S3-compatible server (RustFS).
 
 ```sh
 bundle exec rake test                                                  # unit tests

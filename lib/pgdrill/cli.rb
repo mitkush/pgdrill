@@ -74,7 +74,8 @@ module Pgdrill
                    "  a local path, s3://bucket/key (s3://bucket/prefix/ = newest object; AWS_* env credentials,\n" \
                    "  AWS_ENDPOINT_URL for R2/B2/other S3-compatible stores) or an https:// (e.g. presigned) URL"
         p.on("--latest", "Treat an s3:// location as a prefix and drill the newest backup under it") { o[:latest] = true }
-        p.on("--baseline FILE", "Compare against a baseline written by `pgdrill baseline`") { o[:baseline] = _1 }
+        p.on("--baseline FILE", "Compare against a baseline written by `pgdrill baseline`: a path, s3://bucket/key.json,",
+             "s3://bucket/prefix/ (newest object) or https:// URL") { o[:baseline] = _1 }
         p.on("--baseline-db URL", "Capture the baseline live from production/replica, read-only (or PGDRILL_BASELINE_DB).",
              "Only for drills right after the backup: data written since then counts against --lag-tolerance") { o[:baseline_db] = _1 }
         p.on("--target URL", "Restore into this server instead of a throwaway local one (or PGDRILL_TARGET).",
@@ -89,21 +90,36 @@ module Pgdrill
         p.on("--summary FILE", "Append a Markdown report to FILE (e.g. $GITHUB_STEP_SUMMARY)") { o[:summary] = _1 }
         p.on("--fail-on-warn", "Exit 1 on WARN too, not only on FAIL") { o[:fail_on_warn] = true }
         p.on("--keep", "Keep the restored database (and server) for inspection") { o[:keep] = true }
+        p.on("--config FILE", "pgdrill.yml with custom SQL checks and per-table row tolerances (or PGDRILL_CONFIG)") { o[:config] = _1 }
+        p.on("--webhook URL", "Post the result to this webhook (or PGDRILL_WEBHOOK); Slack-compatible by default") { o[:webhook] = _1 }
+        p.on("--webhook-format FORMAT", Notifier::FORMATS, "slack (default: {\"text\": ...}) or json (full report)") { o[:webhook_format] = _1 }
+        p.on("--notify WHEN", Notifier::WHEN, "problems (default: WARN, FAIL and errors) or always") { o[:notify] = _1 }
       end
       parser.parse!(argv)
       o[:baseline_db] ||= ENV["PGDRILL_BASELINE_DB"] unless o[:baseline]
       o[:target] ||= ENV["PGDRILL_TARGET"]
+      o[:config] ||= ENV["PGDRILL_CONFIG"]
+      o[:webhook] ||= ENV["PGDRILL_WEBHOOK"]
+      notifier = o[:webhook] && Notifier.new(o[:webhook], format: o[:webhook_format] || "slack", on: o[:notify] || "problems", err: @err)
       path = argv.shift or raise Error, "run needs a BACKUP path\n\n#{parser.help}"
       raise Error, "use either --baseline or --baseline-db, not both" if o[:baseline] && o[:baseline_db]
+      o[:config_obj] = o[:config] ? Config.load(o[:config]) : Config.empty
 
-      base, base_source = load_baseline(o)
-      fetched = Source.fetch(path, latest: o[:latest], log: o[:format] == "text" ? @err.method(:puts) : nil)
-      backup = BackupFile.new(fetched.path)
-      report = drill(backup, base, base_source, o, fetched)
+      begin
+        base, base_source = load_baseline(o)
+        fetched = Source.fetch(path, latest: o[:latest], log: o[:format] == "text" ? @err.method(:puts) : nil, skip: /\.json\z/i)
+        backup = BackupFile.new(fetched.path)
+        report = drill(backup, base, base_source, o, fetched)
+      rescue StandardError => e
+        # a drill that can't run (expired credentials, missing extension...) is worth an alert too
+        notifier&.notify(verdict: "ERROR", text: "pgdrill could not drill #{Source.redact_spec(path)}: #{e.message}")
+        raise
+      end
 
       @out.puts(o[:format] == "json" ? report.to_json : report.to_text)
       File.write(o[:output], report.to_json) if o[:output]
       File.open(o[:summary], "a") { _1.puts(report.to_markdown) } if o[:summary]
+      notifier&.notify(verdict: report.verdict, text: Notifier.summary(report.to_h), report: report.to_h)
       failing = o[:fail_on_warn] ? %w[FAIL WARN] : %w[FAIL]
       failing.include?(report.verdict) ? EXIT_FAIL : EXIT_OK
     ensure
@@ -128,6 +144,7 @@ module Pgdrill
           Db.new(cluster.start.url, label: "throwaway")
         end
 
+      ensure_extensions!(backup, admin, cluster&.major || admin.value("show server_version_num").to_i / 10_000)
       restorer = Restorer.new(admin, jobs: o[:jobs])
       @err.puts "restoring #{backup.path}…" if o[:format] == "text"
       result = restorer.restore(backup)
@@ -136,8 +153,9 @@ module Pgdrill
         insp = Inspector.new(result[:db])
         restored = Baseline.capture(insp, like: base, exact_row_limit: o[:exact_row_limit], indexed_freshness: false)
         restored["amcheck"] = insp.amcheck if o[:amcheck]
+        restored["custom"] = run_custom_checks(o[:config_obj], result[:db])
       end
-      findings = Checks.run(restore: result, restored: restored, baseline: base,
+      findings = Checks.run(restore: result, restored: restored, baseline: base, config: o[:config_obj],
                             max_age: o[:max_age], lag_tolerance: o[:lag_tolerance])
       Report.new(backup: backup, source: fetched, baseline_source: base_source, baseline: base, restore: result,
                  restored: restored, findings: findings, options: o)
@@ -164,6 +182,36 @@ module Pgdrill
                    "use the pgdrill:pg#{need} Docker image or a newer Postgres"
     end
 
+# Runs on the restored copy only. A query error counts as a failed check: against a faithful
+    # restore of production, a check query that used to work should still work.
+    def run_custom_checks(config, db)
+      config.checks.map do |c|
+        ok, detail = Config.evaluate(c, db.first_value(c.sql))
+        { "name" => c.name, "ok" => ok, "detail" => detail }
+      rescue Db::QueryError => e
+        { "name" => c.name, "ok" => false, "detail" => "query failed: #{e.message}" }
+      end
+    end
+
+    APT_PACKAGES ={ "postgis" => "postgis-3", "vector" => "pgvector" }.freeze
+
+    # A restore server without PostGIS/pgvector/... can't prove anything about the backup: tool error, with the fix.
+    def ensure_extensions!(backup, admin, major)
+      needed = backup.required_extensions
+      return if needed.empty?
+      missing = needed - admin.rows("select name from pg_available_extensions").map { _1["name"] }
+      return if missing.empty?
+      known = missing.filter_map { |e| APT_PACKAGES.find { |k, _| e == k || e.start_with?("#{k}_") } }.uniq
+      fixes = []
+      fixes << "use the pgdrill:pg#{major}-extras Docker image (PostGIS + pgvector)" if known.any?
+      fixes << "set the Action input `extensions: #{known.map(&:first).join(',')}`" if known.any? && ENV["GITHUB_ACTIONS"] == "true"
+      fixes << "install #{known.map { "postgresql-#{major}-#{_1[1]}" }.join(' and ')}" if known.any?
+      other = missing.reject { |e| APT_PACKAGES.keys.any? { e == _1 || e.start_with?("#{_1}_") } }
+      fixes << "restore into a server that has #{other.join(', ')} via --target" if other.any?
+      raise Error, "the backup needs extension#{'s' if missing.size > 1} #{missing.join(', ')}, which the restore server " \
+                   "doesn't have, so the backup can't be judged; #{fixes.join(', or ')}"
+    end
+
     def client_major(cmd)
       out, st = Open3.capture2(cmd, "--version")
       st.success? ? out[/(\d+)(?:\.\d+)?/, 1].to_i : 0
@@ -171,10 +219,16 @@ module Pgdrill
       raise Error, "#{cmd} not found on PATH"
     end
 
+    # A baseline file can live next to the backups: local path, s3:// (a prefix = newest .json) or https://.
     def load_baseline(o)
-      return [Baseline.load(o[:baseline]), o[:baseline]] if o[:baseline]
+      if o[:baseline]
+        fetched = Source.fetch(o[:baseline])
+        return [Baseline.load(fetched.path), fetched.display]
+      end
       return [capture_baseline(o[:baseline_db], o), "live (#{Db.new(o[:baseline_db]).label})"] if o[:baseline_db]
       [nil, nil]
+    ensure
+      fetched&.cleanup
     end
 
     def capture_baseline(url, o)

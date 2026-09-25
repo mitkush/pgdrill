@@ -16,6 +16,8 @@ module Pgdrill
   autoload :CLI, "pgdrill/cli"
   autoload :S3, "pgdrill/s3"
   autoload :Source, "pgdrill/source"
+  autoload :Config, "pgdrill/config"
+  autoload :Notifier, "pgdrill/notifier"
 end
 
 $LOAD_PATH.unshift(__dir__) unless $LOAD_PATH.include?(__dir__)

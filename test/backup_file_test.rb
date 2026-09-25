@@ -46,6 +46,12 @@ class BackupFileTest < Minitest::Test
     end
   end
 
+  def test_required_extensions_from_plain_sql
+    sql = SQL + "CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public;\nCREATE EXTENSION vector;\n" \
+                "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";\nCOMMENT ON EXTENSION postgis IS 'x';\n"
+    with_file("db.sql", sql) { assert_equal %w[postgis vector uuid-ossp], Pgdrill::BackupFile.new(_1).required_extensions }
+  end
+
   def test_gzipped_plain_sql
     with_file("db.sql.gz", Zlib.gzip(SQL)) do |p|
       b = Pgdrill::BackupFile.new(p)

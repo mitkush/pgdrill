@@ -43,8 +43,17 @@ module Pgdrill
 
     def with_database(name) = dup.tap { _1.instance_variable_set(:@env, @env.merge("PGDATABASE" => name)) }
 
+    SEP = "\x1f" # field separator for unaligned output; can't appear in normal values
+
+    # First column of the first row, or nil for no rows / NULL. For user-written check queries.
+    def first_value(sql, timeout: "10min")
+      line = exec("set statement_timeout = '#{timeout}';\n#{sql}").lines.first&.chomp
+      v = line&.split(SEP, 2)&.first
+      v.nil? || v.empty? ? nil : v
+    end
+
     def exec(sql)
-      out, err, st = Open3.capture3(@env, "psql", "-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql)
+      out, err, st = Open3.capture3(@env, "psql", "-X", "-q", "-At", "-F", SEP, "-v", "ON_ERROR_STOP=1", "-c", sql)
       raise QueryError, err.lines.grep(/ERROR|FATAL|error/).first.to_s.strip.then { _1.empty? ? err.strip : _1 } unless st.success?
       out.strip
     end

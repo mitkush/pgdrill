@@ -36,6 +36,14 @@ sleep 2; aws s3 cp broken.dump s3://drill/nightly/2026-09-26.dump --quiet
 code=$(run s3://drill/nightly --latest)
 check "--latest picks the newer broken backup and fails" 1 "$code" '2026-09-26.dump'
 
+# Baselines stored in S3, and a baseline .json that is the newest object next to the dumps.
+aws s3 cp baseline.json s3://drill/baselines/2026-09-27.json --quiet
+sleep 2; aws s3 cp good.dump s3://drill/nightly/2026-09-27.dump --quiet
+sleep 2; aws s3 cp baseline.json s3://drill/nightly/2026-09-27.baseline.json --quiet
+$PGDRILL run s3://drill/nightly/ --baseline s3://drill/baselines/ --format json --output report.json > out.txt 2>&1; code=$?
+check "baseline from an S3 prefix; newest .json next to the dumps is skipped" 0 "$code" '"location": "s3://drill/nightly/2026-09-27.dump"'
+grep -q '"source": "s3://drill/baselines/2026-09-27.json"' report.json && echo "ok     report names the S3 baseline" || { echo "WRONG  report doesn't name the S3 baseline"; fails=$((fails+1)); }
+
 url=$(aws s3 presign s3://drill/nightly/2026-09-25.dump --expires-in 600)
 code=$(run "$url")
 check "presigned URL passes" 0 "$code" '"verdict": "PASS"'

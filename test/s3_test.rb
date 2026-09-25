@@ -93,6 +93,14 @@ class SourceTest < Minitest::Test
     assert_equal "n/2026-09-25.dump", s3.latest("b", "n/").key
   end
 
+  def test_latest_can_skip_baseline_json_files
+    e = Pgdrill::S3::Entry
+    s3 = Pgdrill::S3.new(access_key: "a", secret_key: "b", region: "r")
+    s3.define_singleton_method(:list) { |*| [e.new("n/db.dump", 5, Time.utc(2026, 9, 25, 3)), e.new("n/db.baseline.json", 5, Time.utc(2026, 9, 25, 4))] }
+    assert_equal "n/db.baseline.json", s3.latest("b", "n/").key
+    assert_equal "n/db.dump", s3.latest("b", "n/", skip: /\.json\z/).key
+  end
+
   def test_s3_prefix_downloads_newest_object_into_private_dir
     e = Pgdrill::S3::Entry
     fake = FakeS3.new([e.new("n/old.dump", 5, Time.utc(2026, 9, 1)), e.new("n/new.dump", 5, Time.utc(2026, 9, 2)), e.new("n/empty", 0, Time.utc(2026, 9, 3))])

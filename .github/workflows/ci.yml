@@ -33,10 +33,12 @@ jobs:
           - { db: pagila, pg: 15 }
           - { db: pagila, pg: 16 }
           - { db: pagila, pg: 17 }
+          - { db: pagila, pg: 18 }
+          - { db: pagila, pg: 16, source: 14 }  # backups from an older server, made by its own pg_dump
           - { db: gitlab, pg: 16 }
           - { db: mastodon, pg: 16 }
           - { db: regression, pg: 16 }
-    name: scenarios (${{ matrix.db }}, pg${{ matrix.pg }})
+    name: scenarios (${{ matrix.db }}, pg${{ matrix.pg }}${{ matrix.source && format(' from pg{0}', matrix.source) || '' }})
     steps:
       - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
@@ -57,10 +59,19 @@ jobs:
           echo "PG_BIN=$HOME/pg/bin" >> $GITHUB_ENV
           echo "PG_SRC=$PWD" >> $GITHUB_ENV
       - name: Production cluster + ${{ matrix.db }} data
+        env:
+          SOURCE: ${{ matrix.source }}
         run: |
           echo "$PG_BIN" >> $GITHUB_PATH
-          export PATH=$PG_BIN:$PATH
-          bash test/scenarios/start-prod.sh "$PG_BIN"
+          PROD_BIN=$PG_BIN
+          if [ -n "$SOURCE" ]; then
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
+            sudo apt-get install -y -q postgresql-$SOURCE > /dev/null
+            PROD_BIN=/usr/lib/postgresql/$SOURCE/bin
+            echo "PGDRILL_SCENARIO_PG_DUMP=$PROD_BIN/pg_dump" >> $GITHUB_ENV
+          fi
+          export PATH=$PROD_BIN:$PATH
+          bash test/scenarios/start-prod.sh "$PROD_BIN"
           bash test/scenarios/load.sh ${{ matrix.db }}
       - name: Scenarios
         env:
@@ -69,7 +80,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: scenarios-${{ matrix.db }}-pg${{ matrix.pg }}
+          name: scenarios-${{ matrix.db }}-pg${{ matrix.pg }}${{ matrix.source && format('-from{0}', matrix.source) || '' }}
           path: tmp/scenarios/results-*.json
 
   s3:
@@ -110,6 +121,35 @@ jobs:
         env:
           VERDICT: ${{ steps.readme.outputs.verdict }}
         run: '[ "$VERDICT" = PASS ] || { echo "expected PASS, got $VERDICT"; exit 1; }'
+      # docs/guides.md shape: newest backup under a prefix, baseline from S3, a config file.
+      - name: Config file for the guide example
+        run: |
+          printf 'checks:\n  - name: films exist\n    sql: select count(*) from film\n    expect: "> 900"\n' > pgdrill.yml
+      - name: Action as in docs/guides.md
+        id: guide
+        uses: ./
+        env:
+          AWS_ACCESS_KEY_ID: rustfsadmin
+          AWS_SECRET_ACCESS_KEY: rustfsadmin
+          AWS_REGION: us-east-1
+        with:
+          backup: s3://drill/nightly/
+          baseline: s3://drill/baselines/
+          max-age: 26000h          # pagila's indexed timestamps are from 2022
+          config: pgdrill.yml
+          postgres-version: "16"
+      - name: Guide example passed, custom check ran
+        env:
+          VERDICT: ${{ steps.guide.outputs.verdict }}
+          REPORT: ${{ steps.guide.outputs.report }}
+        run: |
+          [ "$VERDICT" = PASS ] || { echo "expected PASS, got $VERDICT"; exit 1; }
+          ruby -rjson -e '
+            r = JSON.parse(File.read(ARGV[0]))
+            abort "wrong backup: #{r["backup"]["location"]}" unless r["backup"]["location"] == "s3://drill/nightly/2026-09-27.dump"
+            abort "wrong baseline: #{r["baseline"]["source"]}" unless r["baseline"]["source"] == "s3://drill/baselines/2026-09-27.json"
+            abort "custom check did not run: #{r["evidence"]["custom_checks"]}" unless r["evidence"]["custom_checks"] == { "total" => 1, "passed" => 1 }
+            puts "backup, baseline and custom check all as expected"' "$REPORT"
 
   # The GitHub Action itself, used the way a user's workflow would.
   action:
@@ -126,7 +166,7 @@ jobs:
           ruby exe/pgdrill baseline --db postgresql://postgres@127.0.0.1:55432/pagila -o baseline.json
           pg_dump -h 127.0.0.1 -p 55432 -U postgres -Fc -d pagila -f good.dump
           head -c 300000 good.dump > broken.dump
-      - name: Good backup (default postgres-version 17 restores a 16 backup)
+      - name: Good backup (default postgres-version 18 restores a 16 backup)
         id: good
         uses: ./
         with:
@@ -150,13 +190,63 @@ jobs:
           echo "good=$GOOD broken=$BROKEN broken_outcome=$BROKEN_OUTCOME report=$REPORT"
           [ "$GOOD" = PASS ] && [ "$BROKEN" = FAIL ] && [ "$BROKEN_OUTCOME" = failure ] && [ -s "$REPORT" ]
 
+  # A PostGIS + pgvector database: the base image must refuse it with a fix (exit 2), the -extras
+  # image and the Action's `extensions` input must drill it, and every scenario must still hold.
+  extensions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: "3.3", bundler-cache: true }
+      - name: Postgres 16 with PostGIS and pgvector, the geo database, a backup
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
+          sudo apt-get install -y -q postgresql-16-postgis-3 postgresql-16-pgvector > /dev/null
+          PG_BIN=/usr/lib/postgresql/16/bin
+          echo "$PG_BIN" >> $GITHUB_PATH
+          export PATH=$PG_BIN:$PATH
+          bash test/scenarios/start-prod.sh $PG_BIN
+          bash test/scenarios/load.sh geo
+          pg_dump -h 127.0.0.1 -p 55432 -U postgres -Fc -d geo -f geo.dump && chmod a+r geo.dump
+      - name: Scenarios on the geo database
+        env:
+          PGDRILL_SCENARIO_DB: postgresql://postgres@127.0.0.1:55432/geo
+        run: bundle exec rake scenarios | tee -a $GITHUB_STEP_SUMMARY; exit ${PIPESTATUS[0]}
+      - name: Base image refuses with a fix (exit 2), -extras image drills it
+        run: |
+          docker build -q -f docker/Dockerfile --build-arg PG_MAJOR=16 -t pgdrill:pg16 . > /dev/null
+          docker build -q -f docker/Dockerfile --build-arg PG_MAJOR=16 --build-arg EXTRAS=1 -t pgdrill:pg16-extras . > /dev/null
+          set +e
+          out=$(docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg16 run /work/geo.dump 2>&1); code=$?
+          echo "$out"
+          [ $code -eq 2 ] && grep -q "postgis" <<< "$out" && grep -q "pg16-extras" <<< "$out" || { echo "expected exit 2 naming postgis and the extras image, got $code"; exit 1; }
+          docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg16-extras \
+            run /work/geo.dump --baseline-db postgresql://postgres@127.0.0.1:55432/geo
+      - name: Action without the extensions input
+        id: without
+        continue-on-error: true
+        uses: ./
+        with: { backup: geo.dump, postgres-version: "17" }
+      - name: Action with extensions (installs PostGIS and pgvector for Postgres 17)
+        id: with
+        uses: ./
+        with: { backup: geo.dump, postgres-version: "17", extensions: "postgis, vector" }
+      - name: Action outcomes are right
+        env:
+          WITHOUT: ${{ steps.without.outcome }}/${{ steps.without.outputs.verdict }}
+          WITH: ${{ steps.with.outputs.verdict }}
+        run: |
+          echo "without=$WITHOUT with=$WITH"
+          [ "$WITHOUT" = failure/ERROR ] && [ "$WITH" = PASS ]
+
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17]
+        pg: [15, 16, 17, 18]
     steps:
       - uses: actions/checkout@v5
       - name: Build pgdrill:pg${{ matrix.pg }}

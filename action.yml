@@ -28,7 +28,15 @@ inputs:
   postgres-version:
     description: "Postgres major version for the throwaway server; must be at least the backup's (source server and pg_dump)"
     required: false
-    default: "17"
+    default: "18"
+  extensions:
+    description: "Extensions the backup needs that aren't built in, comma-separated: postgis, vector"
+    required: false
+    default: ""
+  config:
+    description: Path to a pgdrill config file (custom checks, per-table tolerances)
+    required: false
+    default: ""
   fail-on-warn:
     description: Fail the step on WARN as well as FAIL
     required: false
@@ -49,6 +57,7 @@ runs:
       shell: bash
       env:
         PG_VERSION: ${{ inputs.postgres-version }}
+        PG_EXTENSIONS: ${{ inputs.extensions }}
       run: bash "$GITHUB_ACTION_PATH/action/setup-postgres.sh"
     - name: Drill the backup
       id: drill
@@ -61,4 +70,5 @@ runs:
         INPUT_MAX_AGE: ${{ inputs.max-age }}
         INPUT_LAG_TOLERANCE: ${{ inputs.lag-tolerance }}
         INPUT_FAIL_ON_WARN: ${{ inputs.fail-on-warn }}
+        INPUT_CONFIG: ${{ inputs.config }}
       run: bash "$GITHUB_ACTION_PATH/action/run.sh"

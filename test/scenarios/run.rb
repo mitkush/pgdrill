@@ -6,6 +6,7 @@ require "json"
 require "open3"
 require "stringio"
 require "zlib"
+require "socket"
 require_relative "../../lib/pgdrill"
 
 URL = ENV.fetch("PGDRILL_SCENARIO_DB") { abort "set PGDRILL_SCENARIO_DB to a disposable database URL" }
@@ -18,8 +19,9 @@ PROD = Pgdrill::Db.new(URL)
 DUMP_ENV = PROD.env
 def path(name) = File.join(WORK, name)
 
+# PGDRILL_SCENARIO_PG_DUMP lets a scenario make backups with an older pg_dump (e.g. 14) than the restore side.
 def pg_dump(name, *args)
-  _o, err, st = Open3.capture3(DUMP_ENV, "pg_dump", *args, "-f", path(name))
+  _o, err, st = Open3.capture3(DUMP_ENV, ENV.fetch("PGDRILL_SCENARIO_PG_DUMP", "pg_dump"), *args, "-f", path(name))
   abort "pg_dump failed: #{err}" unless st.success?
   path(name)
 end
@@ -91,6 +93,8 @@ leaves = PROD.rows(<<~SQL).map { _1["t"] }
      and c.relname not in ('zz_pgdrill_heartbeat', 'zz_unanalyzed')
      and not exists (select 1 from pg_constraint k where k.confrelid = c.oid)
      and not exists (select 1 from pg_inherits i where i.inhparent = c.oid)
+     -- extension-owned tables (e.g. PostGIS spatial_ref_sys) ignore pg_dump -T, so they can't be "left out"
+     and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
    order by c.reltuples desc, 1 limit 10
 SQL
 
@@ -106,6 +110,50 @@ picked = nonempty.first(5).lazy.map do |t|
   r["evidence"]["restore_ok"] ? [t, r] : nil
 end.find(&:itself)
 picked ? expect("D  table data missing (#{picked[0]})", picked[1], "FAIL", "rows") : skip("D  table data missing", "no non-empty leaf table")
+
+if picked
+  table = picked[0]
+  no_data = path("no_data.dump")
+  File.write(path("checks.yml"), <<~YML)
+    checks:
+      - name: #{table} has rows
+        sql: select count(*) from #{table}
+        expect: "> 0"
+  YML
+  expect("H1 custom check passes on a good backup", drill(good, "--baseline", base, "--config", path("checks.yml")), "PASS")
+  expect("H2 custom check catches the missing data", drill(no_data, "--config", path("checks.yml")), "FAIL", "custom")
+  File.write(path("ignore.yml"), "ignore_tables: [#{table}]\n")
+  expect("H3 ignore_tables skips that table", drill(no_data, "--baseline", base, "--config", path("ignore.yml")), "PASS")
+  File.write(path("broken-check.yml"), "checks:\n  - name: typo\n    sql: select count(*) from no_such_table\n    expect: '> 0'\n")
+  expect("H4 a check query that errors fails the drill", drill(good, "--config", path("broken-check.yml")), "FAIL", "custom")
+
+  # Webhook: a local server records what pgdrill posts.
+  hook = TCPServer.new("127.0.0.1", 0)
+  bodies = Queue.new
+  listener = Thread.new do
+    loop do
+      c = hook.accept
+      head = +""
+      while (l = c.gets) && l != "\r\n" do head << l end
+      bodies << c.read(head[/content-length: (\d+)/i, 1].to_i)
+      c.write "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+      c.close
+    end
+  end
+  url = "http://127.0.0.1:#{hook.addr[1]}/hook"
+  drill(no_data, "--baseline", base, "--webhook", url)
+  text = JSON.parse(bodies.pop(timeout: 10) || "{}")["text"].to_s
+  ok = text.start_with?("pgdrill FAIL for ") && text.include?(table)
+  RESULTS << { "scenario" => "K1 webhook alert on a failed drill", "verdict" => ok ? "sent" : "missing", "correct" => ok }
+  puts format("%-7s %-52s → %s", ok ? "ok" : "WRONG", "K1 webhook alert on a failed drill", text.lines.first.to_s.strip[0, 70])
+  code, = pgdrill("run", path("does-not-exist.dump"), "--webhook", url)
+  text = JSON.parse(bodies.pop(timeout: 10) || "{}")["text"].to_s
+  ok = code == Pgdrill::CLI::EXIT_ERROR && text.start_with?("pgdrill could not drill")
+  RESULTS << { "scenario" => "K2 webhook alert when the drill can't run", "verdict" => ok ? "sent" : "missing", "correct" => ok }
+  puts format("%-7s %-52s → exit %s, %s", ok ? "ok" : "WRONG", "K2 webhook alert when the drill can't run", code, text[0, 60])
+  listener.kill
+  hook.close
+end
 
 if snap["sequences"].any? { _1["max_id"].to_i.positive? }
   File.write(path("no_setval.sql"), File.foreach(path("good.sql")).reject { _1.start_with?("SELECT pg_catalog.setval(") }.join)

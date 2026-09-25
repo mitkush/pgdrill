@@ -16,9 +16,10 @@ module Pgdrill
 
     # latest: treat an s3:// location as a prefix and drill the newest object under it
     # (also implied by a trailing slash).
-    def fetch(spec, latest: false, s3: nil, log: nil)
+    # skip: pattern of keys `latest` must ignore (dumps skip .json so a baseline stored alongside is never drilled).
+    def fetch(spec, latest: false, s3: nil, log: nil, skip: nil)
       case spec
-      when %r{\As3://}i then fetch_s3(spec, latest, s3 || S3.from_env, log)
+      when %r{\As3://}i then fetch_s3(spec, latest, s3 || S3.from_env, log, skip)
       when %r{\Ahttps?://}i then fetch_http(spec, log)
       else
         raise Error, "--latest only works with s3:// locations" if latest
@@ -37,15 +38,17 @@ module Pgdrill
       "(unparseable URL)"
     end
 
+    def redact_spec(spec) = spec.to_s.match?(%r{\Ahttps?://}i) ? redact(spec) : spec.to_s
+
     def parse_s3(spec)
       m = spec.match(%r{\As3://([^/]+)/?(.*)\z}i) or raise Error, "invalid S3 location #{spec.inspect} (use s3://bucket/key)"
       [m[1], m[2]]
     end
 
-    def fetch_s3(spec, latest, client, log)
+    def fetch_s3(spec, latest, client, log, skip = nil)
       bucket, key = parse_s3(spec)
       if latest || key.empty? || key.end_with?("/")
-        entry = client.latest(bucket, key)
+        entry = skip ? client.latest(bucket, key, skip: skip) : client.latest(bucket, key)
         log&.call("newest backup under s3://#{bucket}/#{key}: #{entry.key} (#{entry.last_modified.utc.iso8601})")
         key = entry.key
       end

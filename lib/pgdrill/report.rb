@@ -33,7 +33,9 @@ module Pgdrill
           "lag_behind_baseline_seconds" => (newest && base_newest) ? (base_newest - newest).round : nil,
           "tables" => @restored&.dig("tables")&.size,
           "schema_objects" => @restored&.dig("schema")&.size,
-          "indexes_checked" => @restored&.dig("amcheck", "checked")
+          "indexes_checked" => @restored&.dig("amcheck", "checked"),
+          "custom_checks" => @restored && { "total" => Array(@restored["custom"]).size,
+                                            "passed" => Array(@restored["custom"]).count { _1["ok"] } }
         },
         "findings" => @findings.map(&:to_h)
       }
@@ -97,6 +99,9 @@ module Pgdrill
       rows << ["freshness", status("freshness", e["newest_data"] ? "newest data #{e['newest_data']} (#{Duration.human(e['data_age_seconds'])} old)" : "no timestamp columns found")]
       rows << ["sequences", status("sequences", "#{@restored['sequences'].size} checked")]
       rows << ["amcheck", status("amcheck", @restored.dig("amcheck", "available") ? "#{e['indexes_checked']} indexes clean" : "not run")]
+      custom = Array(@restored["custom"])
+      rows << ["custom", status("custom", "#{custom.size} check#{'s' unless custom.size == 1} passed")] if custom.any?
+      rows
     end
 
     def status(check, ok_text)

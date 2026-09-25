@@ -48,6 +48,26 @@ RUBY
       -e ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY="$(openssl rand -hex 16)" \
       ghcr.io/mastodon/mastodon:v4.7.2 bash -c 'bundle exec rails db:setup && bundle exec rails runner /opt/seed.rb'
     ;;
+  geo)
+    # PostGIS + pgvector (needs postgresql-N-postgis-3 and postgresql-N-pgvector installed)
+    createdb geo
+    psql -X -q -d geo -v ON_ERROR_STOP=1 <<'SQL'
+create extension postgis;
+create extension vector;
+create table places (id bigserial primary key, name text not null, geom geometry(Point, 4326) not null,
+                     created_at timestamptz not null default now());
+insert into places (name, geom)
+  select 'place ' || g, ST_SetSRID(ST_MakePoint(random() * 360 - 180, random() * 180 - 90), 4326)
+    from generate_series(1, 5000) g;
+create index places_geom on places using gist (geom);
+create table embeddings (id bigserial primary key, doc text not null, embedding vector(3) not null,
+                         created_at timestamptz not null default now());
+insert into embeddings (doc, embedding)
+  select 'doc ' || g, format('[%s,%s,%s]', random(), random(), random())::vector from generate_series(1, 5000) g;
+create index embeddings_hnsw on embeddings using hnsw (embedding vector_l2_ops);
+analyze;
+SQL
+    ;;
   regression)
     # needs Postgres built from source (regress.so); PG_SRC points at the configured source tree
     make -C "$PG_SRC/src/test/regress" installcheck > regress.log 2>&1 || echo "(some regression tests failed; harmless, we only need the leftover database)"

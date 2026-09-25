@@ -8,6 +8,7 @@ args=(run "$INPUT_BACKUP" --output "$report" --summary "$GITHUB_STEP_SUMMARY")
 [ -n "$INPUT_MAX_AGE" ] && args+=(--max-age "$INPUT_MAX_AGE")
 [ -n "$INPUT_LAG_TOLERANCE" ] && args+=(--lag-tolerance "$INPUT_LAG_TOLERANCE")
 [ "$INPUT_FAIL_ON_WARN" = "true" ] && args+=(--fail-on-warn)
+[ -n "${INPUT_CONFIG:-}" ] && args+=(--config "$INPUT_CONFIG")
 # PGDRILL_BASELINE_DB is read from the environment, keeping the URL out of argv and logs.
 [ -z "${PGDRILL_BASELINE_DB:-}" ] && unset PGDRILL_BASELINE_DB
 

@@ -16,13 +16,14 @@ module Pgdrill
 
     module_function
 
-    def run(restore:, restored:, baseline: nil, now: Time.now.utc, **opts)
+    def run(restore:, restored:, baseline: nil, now: Time.now.utc, config: Config.empty, **opts)
       o = DEFAULTS.merge(opts)
       return [Finding.new(:critical, "restore", "backup did not restore: #{restore[:error]}")] unless restore[:ok]
 
       findings = []
       findings.concat(schema(baseline, restored)) if baseline
-      findings.concat(rows(baseline, restored, o)) if baseline
+      findings.concat(rows(baseline, restored, o, config)) if baseline
+      findings.concat(custom(restored["custom"]))
       findings.concat(freshness(baseline, restored, now, o))
       findings.concat(sequences(baseline, restored))
       findings.concat(amcheck(restored["amcheck"]))
@@ -44,15 +45,19 @@ module Pgdrill
       [Finding.new(:critical, "schema", "#{missing.size} schema objects from production are missing (#{detail})")]
     end
 
-    def rows(baseline, restored, o)
+    # An empty table where production has rows always fails, whatever the tolerance; only
+    # ignore_tables skips a table entirely.
+    def rows(baseline, restored, o, config = Config.empty)
       baseline["tables"].filter_map do |t, b|
+        next if config.ignored?(t)
         r = restored["tables"][t] or next
         prod, got = b["rows"].to_i, r["rows"].to_i
         next unless prod.positive?
         if got.zero?
           Finding.new(:critical, "rows", "#{t}: restored 0 rows, production has #{prod}")
         else
-          tol = b["method"] == "estimate" ? o[:estimate_tolerance] : o[:row_tolerance]
+          tol = config.table_tolerance[t] ||
+                (b["method"] == "estimate" ? config.estimate_tolerance || o[:estimate_tolerance] : config.row_tolerance || o[:row_tolerance])
           off = (prod - got).abs.to_f / prod
           Finding.new(:warning, "rows", "#{t}: restored #{got} rows vs #{prod} in production (#{(off * 100).round(1)}% off)") if off > tol
         end
@@ -76,7 +81,11 @@ module Pgdrill
       f
     end
 
-    def behind?(s) = s["max_id"].to_i.positive? && (s["last_value"].nil? || s["last_value"] < s["max_id"])
+    def custom(results)
+      Array(results).reject { _1["ok"] }.map { Finding.new(:critical, "custom", "#{_1['name']}: #{_1['detail']}") }
+    end
+
+    def behind?(s) =s["max_id"].to_i.positive? && (s["last_value"].nil? || s["last_value"] < s["max_id"])
 
     def sequences(baseline, restored)
       prod = baseline ? baseline["sequences"].to_h { [[_1["seq"], _1["col"]], _1] } : {}
