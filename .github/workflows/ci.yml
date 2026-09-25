@@ -94,6 +94,22 @@ jobs:
           bash test/scenarios/load.sh pagila
       - name: S3 and URL sources
         run: bash test/scenarios/s3.sh | tee -a $GITHUB_STEP_SUMMARY; exit ${PIPESTATUS[0]}
+      # Exactly the README's usage: credentials on the step's env, an s3:// backup, a live baseline.
+      - name: Action with S3 credentials from the step env (README example)
+        id: readme
+        uses: ./
+        env:
+          AWS_ACCESS_KEY_ID: rustfsadmin
+          AWS_SECRET_ACCESS_KEY: rustfsadmin
+          AWS_REGION: us-east-1
+        with:
+          backup: s3://drill/nightly/2026-09-25.dump
+          baseline-db: postgresql://postgres@127.0.0.1:55432/pagila
+          postgres-version: "16"
+      - name: README example passed
+        env:
+          VERDICT: ${{ steps.readme.outputs.verdict }}
+        run: '[ "$VERDICT" = PASS ] || { echo "expected PASS, got $VERDICT"; exit 1; }'
 
   # The GitHub Action itself, used the way a user's workflow would.
   action:
@@ -162,6 +178,16 @@ jobs:
           docker run --rm --network host -v "$PWD:/work:ro" pgdrill:pg${{ matrix.pg }} run /work/broken.dump
           code=$?
           [ $code -eq 1 ] || { echo "expected exit 1 for a broken backup, got $code"; exit 1; }
+      - name: The arm64 image (Apple Silicon, Graviton) actually runs a drill, under emulation
+        if: matrix.pg == 16
+        run: |
+          docker run --privileged --rm tonistiigi/binfmt --install arm64 > /dev/null
+          docker buildx create --use > /dev/null
+          docker buildx build --platform linux/arm64 --load -f docker/Dockerfile --build-arg PG_MAJOR=16 -t pgdrill:pg16-arm64 .
+          docker run --rm --platform linux/arm64 pgdrill:pg16-arm64 version
+          docker run --rm --platform linux/arm64 --entrypoint uname pgdrill:pg16-arm64 -m
+          docker run --rm --platform linux/arm64 --network host -v "$PWD:/work:ro" pgdrill:pg16-arm64 \
+            run /work/good.dump --baseline-db postgresql://postgres@127.0.0.1:55432/pagila
       - name: A backup written by a newer pg_dump is a tool error (exit 2), not a failed backup
         if: matrix.pg == 16
         run: |

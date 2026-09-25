@@ -62,7 +62,11 @@ module Pgdrill
       path = File.join(dir, name.gsub(/[^\w.\-]/, "_"))
       log&.call("downloading #{display}")
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      File.open(path, "wb", 0o600) { |io| yield io }
+      expected = File.open(path, "wb", 0o600) { |io| yield io }
+      # A transfer that ends early is a network problem, not a broken backup: stop with a tool error.
+      if expected && (got = File.size(path)) != expected
+        raise Error, "download of #{display} was cut off: received #{got} of #{expected} bytes; retry the drill"
+      end
       Fetched.new(path: path, display: display, key: key, dir: dir,
                   seconds: (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(1))
     rescue StandardError
@@ -72,9 +76,13 @@ module Pgdrill
 
     def http_get(uri, io, redirects = 0)
       Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: 15, read_timeout: 120) do |http|
-        http.request(Net::HTTP::Get.new(uri)) do |res|
+        req = Net::HTTP::Get.new(uri)
+        req["accept-encoding"] = "identity" # so Content-Length is the real file size
+        http.request(req) do |res|
           case res
-          when Net::HTTPSuccess then res.read_body { io.write(_1) }
+          when Net::HTTPSuccess
+            res.read_body { io.write(_1) }
+            return res["content-length"]&.to_i
           when Net::HTTPRedirection
             raise Error, "too many redirects downloading #{redact(uri.to_s)}" if redirects >= MAX_REDIRECTS
             return http_get(URI.join(uri, res["location"]), io, redirects + 1)
@@ -83,8 +91,8 @@ module Pgdrill
           end
         end
       end
-    rescue SocketError, SystemCallError, Net::OpenTimeout, Net::ReadTimeout, OpenSSL::SSL::SSLError => e
-      raise Error, "cannot download #{redact(uri.to_s)}: #{e.message}"
+    rescue *S3::NETWORK_ERRORS => e
+      raise Error, "cannot download #{redact(uri.to_s)}: #{e.class}: #{e.message}"
     end
   end
 end

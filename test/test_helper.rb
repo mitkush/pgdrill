@@ -1,6 +1,7 @@
 require "minitest/autorun"
 require "json"
 require "tmpdir"
+require "stringio"
 require_relative "../lib/pgdrill"
 
 module Snapshots

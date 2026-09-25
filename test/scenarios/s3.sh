@@ -25,6 +25,9 @@ aws s3 cp good.dump s3://drill/nightly/2026-09-25.dump --quiet
 code=$(run s3://drill/nightly/)
 check "prefix → newest backup (good) passes" 0 "$code" '"location": "s3://drill/nightly/2026-09-25.dump"'
 
+n=$(ruby -I "$(dirname "$0")/../../lib" -rpgdrill -e 'print Pgdrill::S3.from_env.list("drill", "nightly/", page_size: 1).size')
+[ "$n" = 2 ] && echo "ok     listing follows pagination (2 objects, 1 per page)" || { echo "WRONG  paginated listing returned $n objects, expected 2"; fails=$((fails+1)); }
+
 code=$(run s3://drill/nightly/2026-09-24.dump)
 check "explicit key (broken) fails" 1 "$code" '"verdict": "FAIL"'
 

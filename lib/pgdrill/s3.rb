@@ -30,18 +30,22 @@ module Pgdrill
       @endpoint = endpoint && URI.parse(endpoint)
     end
 
+    # Returns the Content-Length the server declared, so callers can detect a cut-off transfer.
     def get(bucket, key, io)
       uri = object_uri(bucket, key)
       request(uri) do |res|
         raise Error, s3_error(res, "s3://#{bucket}/#{key}") unless res.is_a?(Net::HTTPSuccess)
         res.read_body { io.write(_1) }
+        res["content-length"]&.to_i
       end
     end
 
-    def list(bucket, prefix)
+    # page_size is only for exercising pagination; S3 defaults to 1000 keys per page.
+    def list(bucket, prefix, page_size: nil)
       entries, token = [], nil
       loop do
         query = { "list-type" => "2", "prefix" => prefix }
+        query["max-keys"] = page_size.to_s if page_size
         query["continuation-token"] = token if token
         body = nil
         request(object_uri(bucket, "", query)) do |res|
@@ -57,7 +61,8 @@ module Pgdrill
 
     # Newest non-empty object under the prefix: the usual "drill last night's backup" case.
     def latest(bucket, prefix)
-      pick = list(bucket, prefix).reject { _1.size.zero? || _1.key.end_with?("/") }.max_by(&:last_modified)
+      # LastModified has 1-second resolution; ties go to the lexically last key (date-named backups sort right).
+      pick = list(bucket, prefix).reject { _1.size.zero? || _1.key.end_with?("/") }.max_by { [_1.last_modified, _1.key] }
       raise Error, "no backups found under s3://#{bucket}/#{prefix}" unless pick
       pick
     end
@@ -105,11 +110,17 @@ module Pgdrill
       http.start do
         req = Net::HTTP::Get.new(uri)
         signed_headers("GET", uri).each { |k, v| req[k] = v }
-        http.request(req) { yield _1 }
+        req["accept-encoding"] = "identity" # keep Content-Length equal to the object size (unsigned header)
+        result = nil
+        http.request(req) { result = yield _1 }
+        result
       end
-    rescue SocketError, SystemCallError, Net::OpenTimeout, Net::ReadTimeout, OpenSSL::SSL::SSLError => e
-      raise Error, "cannot reach #{uri.host}: #{e.message}"
+    rescue *NETWORK_ERRORS => e
+      raise Error, "cannot read from #{uri.host}: #{e.class}: #{e.message}"
     end
+
+    NETWORK_ERRORS = [SocketError, SystemCallError, IOError, EOFError, Timeout::Error, Net::OpenTimeout,
+                      Net::ReadTimeout, Net::HTTPBadResponse, OpenSSL::SSL::SSLError].freeze
 
     def host_header(uri) = uri.port == uri.default_port ? uri.host : "#{uri.host}:#{uri.port}"
 
@@ -136,7 +147,9 @@ module Pgdrill
       body = res.body.to_s rescue ""
       code = body[%r{<Code>(.*?)</Code>}, 1]
       msg = body[%r{<Message>(.*?)</Message>}m, 1]
-      "#{what}: HTTP #{res.code}#{code ? " #{code}" : ''}#{msg ? " (#{xml_text(msg)})" : ''}"
+      hint = %w[PermanentRedirect AuthorizationHeaderMalformed IllegalLocationConstraintException].include?(code) ?
+        " — the bucket is probably in another region; set AWS_REGION (currently #{@region})" : ""
+      "#{what}: HTTP #{res.code}#{code ? " #{code}" : ''}#{msg ? " (#{xml_text(msg)})" : ''}#{hint}"
     end
   end
 end

@@ -74,6 +74,25 @@ class SourceTest < Minitest::Test
     def get(_bucket, key, io) = io.write("contents of #{key}")
   end
 
+  class ShortS3 < FakeS3
+    def get(_bucket, _key, io) = io.write("partial").then { 1_000 } # server declared 1000 bytes
+  end
+
+  def test_cut_off_download_is_a_tool_error_and_cleans_up
+    before = Dir.glob(File.join(Dir.tmpdir, "pgdrill-src-*")).size
+    err = assert_raises(Pgdrill::Error) { Pgdrill::Source.fetch("s3://b/k.dump", s3: ShortS3.new([])) }
+    assert_includes err.message, "cut off"
+    assert_equal before, Dir.glob(File.join(Dir.tmpdir, "pgdrill-src-*")).size
+  end
+
+  def test_latest_breaks_timestamp_ties_by_key
+    e = Pgdrill::S3::Entry
+    s3 = Pgdrill::S3.new(access_key: "a", secret_key: "b", region: "r")
+    t = Time.utc(2026, 9, 25)
+    s3.define_singleton_method(:list) { |*| [e.new("n/2026-09-24.dump", 5, t), e.new("n/2026-09-25.dump", 5, t)] }
+    assert_equal "n/2026-09-25.dump", s3.latest("b", "n/").key
+  end
+
   def test_s3_prefix_downloads_newest_object_into_private_dir
     e = Pgdrill::S3::Entry
     fake = FakeS3.new([e.new("n/old.dump", 5, Time.utc(2026, 9, 1)), e.new("n/new.dump", 5, Time.utc(2026, 9, 2)), e.new("n/empty", 0, Time.utc(2026, 9, 3))])

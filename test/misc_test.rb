@@ -29,6 +29,15 @@ class BaselineSizeTest < Minitest::Test
   end
 end
 
+class CLIExitCodeTest < Minitest::Test
+  def test_unexpected_crash_is_exit_2_never_1
+    cli = Pgdrill::CLI.new(StringIO.new, err = StringIO.new)
+    cli.define_singleton_method(:run) { |_| raise NoMethodError, "boom" }
+    assert_equal Pgdrill::CLI::EXIT_ERROR, cli.call(["run", "x.dump"])
+    assert_includes err.string, "internal error"
+  end
+end
+
 class DbTest < Minitest::Test
   def test_credentials_go_to_env_not_argv
     env = Pgdrill::Db.env_for("postgresql://app%40x:s%3Acret@db.example.com:6543/my%20db?sslmode=require")

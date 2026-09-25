@@ -36,6 +36,10 @@ module Pgdrill
     rescue Error, OptionParser::ParseError => e
       @err.puts "pgdrill: #{e.message}"
       EXIT_ERROR
+    rescue StandardError => e
+      # Exit 1 means "the backup failed a check"; a crash must never look like that.
+      @err.puts "pgdrill: internal error: #{e.class}: #{e.message}\n  #{e.backtrace&.first(5)&.join("\n  ")}"
+      EXIT_ERROR
     end
 
     private

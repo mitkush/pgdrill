@@ -116,8 +116,10 @@ jobs:
 
 The step fails when the backup fails the drill, writes the results to the job
 summary, and sets `verdict` (PASS/WARN/FAIL) and `report` (JSON path) outputs.
-It installs the requested `postgres-version` (default 17, which can restore
-backups from any older version) on the Linux runner; no image or gem needed.
+It installs the requested `postgres-version` (default 17, which also restores
+backups made by older versions) on the runner and runs pgdrill from the action
+itself; no image or gem needed. It needs a Linux runner with Ruby, which
+GitHub-hosted `ubuntu-*` runners have.
 A live `baseline-db` here is taken after the backup, so allow for writes since
 then with `lag-tolerance` (or upload a baseline file taken just before the backup).
 
